@@ -8,8 +8,8 @@ import { LAUNCHES_FILE, readJson, writeJson } from "./paths"
 import { effectiveSettings, trenchy } from "./settings"
 import { walletStore } from "./wallets"
 
-/** launches.json in _app/pons-starter/, newest first (at most 200). */
-export const readLaunches = (): LaunchRecord[] => readJson<LaunchRecord[]>(LAUNCHES_FILE, [])
+/** launches.json in _app/<app>-starter/, newest first (at most 200). */
+export const readLaunches = (): LaunchRecord[] => readJson<LaunchRecord[]>(LAUNCHES_FILE, []).filter((l) => typeof l?.wallets?.dev === "string") // records of the older pons starter (another shape) are left out
 export function saveLaunch(rec: LaunchRecord): void {
   const all = readLaunches().filter((l) => l.id !== rec.id)
   all.unshift(rec)
@@ -24,8 +24,5 @@ export function serverEnv(): Env {
     wallets: walletStore,
     launches: { list: readLaunches, save: saveLaunch },
     slippage: s.slippage,
-    sniperGapMs: s.sniperGapMs,
-    holderWindowS: s.holderWindowS,
-    holderDelayS: s.holderDelayS,
   }
 }

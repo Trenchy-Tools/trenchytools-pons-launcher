@@ -1,17 +1,13 @@
 import { body, fail, ok } from "@/lib/http"
-import { normalizeForm, planWithBalances, type LaunchForm } from "@/lib/launch"
+import { fundingPlan } from "@/lib/launch"
+import { readForm } from "../form"
 
-/**
- * POST /api/launch/plan (the form) → the funding plan: per wallet buy + 0.5 % fee + gas reserve (dev: + pons launch
- * fee), live balance (GET /api/rh/balances?wallets=) and shortfall. Creates (and backs up) missing buyer wallets.
- */
+export const dynamic = "force-dynamic"
+
+/** POST /api/launch/plan (LaunchForm) → the funding plan: per wallet buy + 0.5 % API fee + a gas buffer; the dev adds the pons launch fee and the create's gas. No API call. */
 export async function POST(req: Request) {
   try {
-    const b = await body<LaunchForm>(req)
-    // the plan and funding do not need the image, name or symbol yet (the Launch page asks while the form is being typed)
-    const form = normalizeForm({ ...b, name: b.name || "plan", symbol: b.symbol || "PLAN", image: b.image || "https://placeholder.invalid/x" })
-    const { resolved, ...plan } = await planWithBalances(form)
-    return ok({ ...plan, dev: resolved.dev.publicKey, exempt: resolved.exempt.length, wallets: { bundle: resolved.bundle, snipers: resolved.snipers, holders: resolved.holders } })
+    return ok(await fundingPlan(readForm(await body(req))))
   } catch (e) {
     return fail(e)
   }

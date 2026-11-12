@@ -4,17 +4,19 @@
  * The browser engine of demo mode: this app's /api/* routes, answered inside the visitor's tab.
  *
  * Same paths, same request bodies, same JSON answers and error shapes as the route handlers in app/api/** (local
- * mode), so the pages run unchanged on top of it (lib/browser/demo.ts appFetch / appEvents is the switch). The flows
- * are the shared ones in lib/core/* (launch executor, trading, funding, timers, the signer); only the storage differs:
+ * mode), so the pages run unchanged on top of it (lib/browser/demo.ts appFetch / appEvents is the switch). The pages are
+ * the same files as the pump.fun starter's: the routes and their answers have the same shapes, with the coin in `token`.
+ * The flows are the shared ones in lib/core/* (launch executor, trading, funding, timers, form parsing); only the storage
+ * differs:
  *
  *   wallets           lib/browser/keystore.ts (localStorage, backup rule: not usable until downloaded)
  *   API key           lib/browser/api-key.ts (one per visitor, created on first visit)
  *   launches + log    localStorage <prefix>.launches / <prefix>.launchLog.<id>; a launch runs in this tab
  *   timed sells       localStorage <prefix>.timers; fired by any open tab of the app, resumed on reload
- *   settings          localStorage <prefix>.settings (slippage, sniper gap, holder window / delay)
+ *   settings          localStorage <prefix>.settings (slippage)
  *
  * Signing needs chain data, and the API has it: GET /api/rh/account (pendingNonce, fees, chainId) → viem
- * `account.signTransaction` per transaction, nonce + 1 per transaction of a run → POST /api/rh/send → GET /api/rh/tx/:hash
+ * `account.signTransaction` per transaction, nonce + 1 per transaction of a run → POST /api/rh/send → GET /api/rh/txs
  * (lib/core/evm.ts sendAll). Every call goes from the browser straight to https://api.trenchy.tools with the visitor's
  * key (lib/trenchy.ts, the same client class the server uses), the live-trades websocket too. Nothing touches the
  * app's own server.
@@ -26,7 +28,7 @@ import * as trading from "../core/trading"
 import { fundDirect, fundViaExchange, gather, sendDirect } from "../core/funding"
 import { DEFAULTS, type WalletStore } from "../core/env"
 import { RouteError, errorBody } from "../core/errors"
-import { isAddress, num, strings } from "../core/form"
+import { isAddress, num, readForm, strings } from "../core/form"
 import { fireRule, forToken, isFinished, newTimerRule, type TimerRule } from "../core/timers"
 import { APP_NAME, CHAIN, cleanLabel, isRole, newLabel, same, stampAt, type Role, type WalletInfo } from "../core/wallet-record"
 import { ApiError, Trenchy, type TransferMode } from "../trenchy"
@@ -34,6 +36,7 @@ import { ensureApiKey, keyError, maskKey, readApiKey, replaceApiKey, setApiKey, 
 import { DEMO_API_URL, DEMO_KEY_LABEL, KEYS_HOME, STORE_PREFIX, type EventStream } from "./demo"
 import { createKeystore, type KeyView } from "./keystore"
 import { generateKey, parseSecret, signerOf } from "./signer-evm"
+import { chain } from "../chain"
 
 const P = STORE_PREFIX
 const KEY_OPTS: KeyOptions = { storageKey: `${P}.apiKey`, apiUrl: DEMO_API_URL, label: DEMO_KEY_LABEL }
@@ -56,12 +59,11 @@ function save(key: string, value: unknown): void {
   }
 }
 
-const NUMS = ["slippage", "sniperGapMs", "holderWindowS", "holderDelayS"] as const
-type BrowserSettings = Partial<Record<(typeof NUMS)[number], number>>
+type BrowserSettings = { slippage?: number }
 const okNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0
 const settings = () => {
   const s = load<BrowserSettings>(`${P}.settings`, {})
-  return { slippage: okNum(s.slippage) ? s.slippage : DEFAULTS.slippage, sniperGapMs: okNum(s.sniperGapMs) ? s.sniperGapMs : DEFAULTS.sniperGapMs, holderWindowS: okNum(s.holderWindowS) ? s.holderWindowS : DEFAULTS.holderWindowS, holderDelayS: okNum(s.holderDelayS) ? s.holderDelayS : DEFAULTS.holderDelayS }
+  return { slippage: okNum(s.slippage) ? s.slippage : DEFAULTS.slippage, overrides: { apiUrl: false, slippage: okNum(s.slippage) } }
 }
 
 /** The API client with the visitor's key (the same class the server uses with its key). */
@@ -69,10 +71,10 @@ const api = () => new Trenchy(DEMO_API_URL, readApiKey(KEY_OPTS) ?? "")
 
 // ── wallets: the keystore as the store the shared flows use ─────────────────
 
-const ks = createKeystore({ prefix: P, chain: CHAIN, app: APP_NAME, fileTag: "pons" })
+const ks = createKeystore({ prefix: P, chain: CHAIN, app: APP_NAME, fileTag: chain.suiteId })
 
-/** An address as the keystore stores it (checksummed), whatever letter case the caller used. */
-const canon = (publicKey: string): string => ks.list().find((w) => same(w.publicKey, publicKey))?.publicKey ?? publicKey
+/** An address as the keystore stores it (checksummed), whatever letter case the caller used (archived ones too). */
+const canon = (publicKey: string): string => ks.list().find((w) => same(w.publicKey, publicKey))?.publicKey ?? ks.archivedList().find((w) => same(w.publicKey, publicKey))?.publicKey ?? publicKey
 
 const info = (w: KeyView): WalletInfo & { backedUp: boolean } => ({ publicKey: w.publicKey, chain: w.chain, role: isRole(w.role) ? w.role : "trader", label: w.label, createdAt: w.createdAt, app: w.app, file: KEYS_HOME, backedUp: w.backedUp })
 
@@ -95,47 +97,59 @@ const walletStore: WalletStore = {
   main: () => { const pk = ks.main(); const w = pk ? ks.get(pk) : null; return w ? info(w) : null },
   assertBackedUp: (pk) => ks.assertBackedUp(canon(pk)),
   accountOf: (pk) => { const c = canon(pk); return signerOf(c, ks.signerSecret(c)) },
-  create: (count, role, label) => createWallets(count, role, label),
+  // a wallet the launch executor makes itself is backed up on the spot (the key file downloads first), like the Launch page does
+  create: (count, role, label) => { if (!(count >= 1)) return []; const out = createWallets(count, role, label); ks.downloadBackup(); return out.map((w) => ({ ...w, backedUp: true })) },
+  backupNote: () => `is backed up (key downloaded; kept in ${KEYS_HOME})`,
 }
 
 // ── launches ────────────────────────────────────────────────────────────────
 
-/** Newest first, at most 200 (as launches.json in local mode). */
-const readLaunches = () => load<launch.LaunchRecord[]>(`${P}.launches`, [])
+const readLaunches = () => load<launch.LaunchRecord[]>(`${P}.launches`, []).filter((l) => !!l?.wallets && typeof (l.wallets as { dev?: unknown }).dev === "string") // records of the older pons starter (another shape) are left out
 function saveLaunch(rec: launch.LaunchRecord): void {
-  save(`${P}.launches`, [rec, ...readLaunches().filter((l) => l.id !== rec.id)].slice(0, 200))
+  save(`${P}.launches`, [...load<launch.LaunchRecord[]>(`${P}.launches`, []).filter((l) => l.id !== rec.id), rec].slice(-200))
 }
 
 /** The Env the shared flows run on, with the current key and settings. Cheap: build one per request. */
 function env(): launch.Env {
-  return { api: api(), wallets: walletStore, launches: { list: readLaunches, save: saveLaunch }, ...settings() }
+  return { api: api(), wallets: walletStore, launches: { list: () => readLaunches().reverse(), save: saveLaunch }, slippage: settings().slippage }
 }
 
 // ── launch log: in memory, mirrored to localStorage so a reload still shows it ─────────────────────────────────────
 
-const logs = { entries: new Map<string, launch.LogEntry[]>(), listeners: new Map<string, Set<(e: launch.LogEntry) => void>>() }
-const entriesOf = (id: string): launch.LogEntry[] => logs.entries.get(id) ?? load<launch.LogEntry[]>(`${P}.launchLog.${id}`, [])
-function logger(id: string): launch.Log {
-  return (stage, msg, extra = {}) => {
-    const e: launch.LogEntry = { t: Date.now(), stage, msg, ...extra }
-    const list = [...entriesOf(id), e]
-    logs.entries.set(id, list)
+const log = { events: new Map<string, launch.LaunchEvent[]>(), listeners: new Map<string, Set<(e: launch.LaunchEvent) => void>>() }
+const eventsOf = (id: string): launch.LaunchEvent[] => log.events.get(id) ?? load<launch.LaunchEvent[]>(`${P}.launchLog.${id}`, [])
+function emitter(id: string): launch.Emit {
+  return (stage, message, extra = {}) => {
+    const e: launch.LaunchEvent = { at: Date.now(), stage, message, ...extra }
+    const list = [...eventsOf(id), e]
+    log.events.set(id, list)
     try { save(`${P}.launchLog.${id}`, list.slice(-300)) } catch { /* the log is a convenience */ }
-    for (const cb of logs.listeners.get(id) ?? []) cb(e)
+    for (const cb of log.listeners.get(id) ?? []) cb(e)
   }
 }
-function subscribeLaunch(id: string, cb: (e: launch.LogEntry) => void): () => void {
-  if (!logs.listeners.has(id)) logs.listeners.set(id, new Set())
-  logs.listeners.get(id)!.add(cb)
-  return () => logs.listeners.get(id)?.delete(cb)
+function subscribeLaunch(id: string, cb: (e: launch.LaunchEvent) => void): () => void {
+  if (!log.listeners.has(id)) log.listeners.set(id, new Set())
+  log.listeners.get(id)!.add(cb)
+  return () => log.listeners.get(id)?.delete(cb)
 }
 
 const locks = () => (typeof navigator !== "undefined" && "locks" in navigator ? navigator.locks : null)
 const launchLock = (id: string) => `${P}.launch.${id}`
 
-/** Run a launch in this tab, holding a lock so another tab (or a reload) can tell it is still running. */
+let running = 0
+const holdPage = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = "" }
+
+/** Run a prepared launch in this tab, holding a lock so another tab can tell it is still running. */
 function runInTab(rec: launch.LaunchRecord, form: launch.LaunchForm): void {
-  const go = () => launch.execute(env(), rec, form, logger(rec.id))
+  // while a launch runs in this tab, leaving or reloading the page asks first: the launch lives in this tab
+  const go = async () => {
+    running++
+    if (running === 1) window.addEventListener("beforeunload", holdPage)
+    try { await launch.runLaunch(env(), rec, form, emitter(rec.id)) } finally {
+      running--
+      if (running === 0) window.removeEventListener("beforeunload", holdPage)
+    }
+  }
   const l = locks()
   if (l) void l.request(launchLock(rec.id), go)
   else void go()
@@ -148,10 +162,10 @@ async function recoverLaunches(): Promise<void> {
   const held = new Set(((await l.query()).held ?? []).map((x) => x.name))
   for (const rec of readLaunches()) {
     if (rec.status !== "running" || held.has(launchLock(rec.id))) continue
-    rec.status = "failed"
+    rec.status = "error"
     rec.error = "Interrupted: the tab running this launch was closed. Check the coin and the wallets before trying again."
     saveLaunch(rec)
-    logger(rec.id)("failed", rec.error, { level: "error", done: true })
+    emitter(rec.id)("error", rec.error)
   }
 }
 
@@ -214,6 +228,8 @@ async function body<T extends Record<string, unknown>>(req: Request): Promise<Pa
   try { return (await req.json()) as Partial<T> } catch { return {} }
 }
 const query = (req: Request, k: string) => new URL(req.url).searchParams.get(k)
+/** the coin of a request: `?token=` (this app's name) or `?mint=` */
+const coin = (req: Request) => query(req, "token") || query(req, "mint") || ""
 
 type Handler = (req: Request, params: string[]) => Promise<Response> | Response
 /** [method, path pattern, handler, default status of a failure] — the same table as app/api/**. */
@@ -222,11 +238,6 @@ const route = (method: string, pattern: RegExp, h: Handler, failStatus?: number)
 const walletsView = () => ({ dir: KEYS_HOME, wallets: ks.list().map(info), mainWallet: ks.main(), archived: ks.archivedCount(), missing: [], pending: ks.pending().map((w) => ({ publicKey: w.publicKey, label: w.label })) })
 /** `publicKeys` of a body: the 0x ones, in the keystore's spelling. */
 const targetsOf = (v: unknown) => strings(v).filter(isAddress).map(canon)
-/** The launch form of a body; plan / fund take it before an image, a name or a symbol exists. */
-const formOf = async (req: Request, placeholderImage = false) => {
-  const b = await body<launch.LaunchForm>(req)
-  return launch.normalizeForm(placeholderImage ? { ...b, name: b.name || "plan", symbol: b.symbol || "PLAN", image: b.image || "https://placeholder.invalid/x" } : b)
-}
 
 // wallets
 route("GET", /^\/api\/wallets$/, () => ok(walletsView()))
@@ -263,24 +274,35 @@ route("POST", /^\/api\/wallets\/export$/, async (req) => {
   return ok({ wallets: ks.secrets(targets).map((r) => ({ publicKey: r.publicKey, privateKey: r.privateKey, label: r.label, file: KEYS_HOME })) })
 })
 route("POST", /^\/api\/wallets\/archive$/, async (req) => {
+  const b = await body<{ publicKeys: string[]; allowMain?: boolean }>(req)
+  const targets = targetsOf(b.publicKeys)
+  if (!targets.length) throw new RouteError("publicKeys: at least one 0x wallet")
+  return ok({ archived: ks.archive(targets, b.allowMain === true), dir: `${KEYS_HOME} (archived wallets stay in every backup and export)` })
+}, 409)
+route("GET", /^\/api\/wallets\/archived$/, async () => {
+  const list = ks.archivedList()
+  const bal = list.length ? await api().evm.walletBalances(list.map((w) => w.publicKey)).catch(() => []) : []
+  const by = new Map(bal.map((b) => [b.wallet.toLowerCase(), b.eth]))
+  return ok({ wallets: list.map((w) => ({ ...info(w), archivedAt: w.archivedAt, native: by.get(w.publicKey.toLowerCase()) ?? null })) })
+})
+route("POST", /^\/api\/wallets\/unarchive$/, async (req) => {
   const targets = targetsOf((await body<{ publicKeys: string[] }>(req)).publicKeys)
   if (!targets.length) throw new RouteError("publicKeys: at least one 0x wallet")
-  return ok({ archived: ks.archive(targets), dir: `${KEYS_HOME} (archived wallets stay in every backup and export)` })
-}, 409)
+  return ok({ restored: ks.unarchive(targets) })
+})
 /** Demo only: `Download backup` (the not-yet-backed-up wallets) and `Export all keys` (every wallet). One file per click. */
 route("POST", /^\/api\/wallets\/backup$/, () => ok(ks.downloadBackup()))
 route("POST", /^\/api\/wallets\/export-all$/, () => ok(ks.exportAll()))
 /** Local mode's "Rewrite backups", in the browser: the same download as `Download backup`. */
 route("POST", /^\/api\/wallets\/rewrite-backups$/, () => { const r = ks.downloadBackup(); return ok({ dir: KEYS_HOME, files: ks.list().length, restored: [], csvAdded: r.count, downloaded: r.files }) })
 route("GET", /^\/api\/wallets\/balances$/, async (req) => {
-  const token = query(req, "token")
-  const rows = await trading.balanceRows(env(), token && isAddress(token) ? token : null)
-  return ok({ token: token ?? null, rows, balances: rows })
+  const token = coin(req)
+  return ok(await trading.balanceRows(env(), isAddress(token) ? token : null))
 })
 route("GET", /^\/api\/wallets\/account$/, async (req) => {
   const wallet = query(req, "wallet")
   if (!isAddress(wallet)) throw new RouteError("wallet: a 0x address")
-  return ok(await api().rh.account(wallet))
+  return ok(await api().evm.account(wallet))
 })
 route("POST", /^\/api\/wallets\/fund$/, async (req) => {
   const b = await body<{ publicKeys: string[]; amount: number; amountEth: number }>(req)
@@ -290,7 +312,7 @@ route("POST", /^\/api\/wallets\/fund$/, async (req) => {
   if (!(amount > 0)) throw new RouteError("amount must be greater than zero")
   return ok({ amountEth: amount, ...(await fundDirect(env(), targets.map((publicKey) => ({ publicKey, eth: amount })))) })
 })
-route("POST", /^\/api\/wallets\/fund-exchange$/, async (req) => {
+route("POST", /^\/api\/wallets\/(fund-exchange|fund-via-exchange)$/, async (req) => {
   const b = await body<{ publicKeys: string[]; amount: number; amountEth: number; mode: TransferMode; venue: string }>(req)
   const targets = targetsOf(b.publicKeys)
   const amount = num(b.amount ?? b.amountEth, 0)
@@ -316,149 +338,153 @@ route("POST", /^\/api\/wallets\/gather$/, async (req) => {
 route("GET", /^\/api\/transfer\/venues$/, async () => ok(await api().transferVenues()))
 route("GET", /^\/api\/transfer\/([^/]+)$/, async (_req, [id]) => ok(await api().transferStatus(decodeURIComponent(id))))
 
-// settings: the same shape as GET /api/settings in local mode, plus `demo`, `pending` and `keyError`
-async function settingsView() {
-  const key = await ensureApiKey(KEY_OPTS)
+// settings: the same shapes as the pump.fun starter's (no tip on this chain)
+const settingsView = () => {
   const s = settings()
-  const a = api()
-  let status: "connected" | "no_key" | "error" = "no_key"
-  let keyPrefix: string | undefined
-  let error: { error: string; code?: string; hint?: string; docs?: string; status?: number } | undefined
-  if (key) {
-    try {
-      const me = await a.me()
-      status = "connected"
-      keyPrefix = me.keyPrefix
-    } catch (e) {
-      status = "error"
-      error = e instanceof ApiError ? e.toJSON() : { error: e instanceof Error ? e.message : String(e) }
-    }
-  }
-  const main = walletStore.main()
-  return {
-    apiUrl: DEMO_API_URL, apiKeyMasked: key ? maskKey(key) : "", apiKeyFrom: "browser",
-    ...s, backupDir: KEYS_HOME, funding: main, status, keyPrefix, error,
-    createKeyUrl: `${DEMO_API_URL}/api/create-api-key?label=${DEMO_KEY_LABEL}`,
-    demo: true, pending: ks.pending().length, keyError: key ? null : keyError(),
-  }
+  const key = readApiKey(KEY_OPTS)
+  return { apiUrl: DEMO_API_URL, apiKeyConfigured: !!key, apiKeyPrefix: key ? maskKey(key) : null, apiKeyFrom: "browser", slippage: s.slippage, overrides: s.overrides, dir: KEYS_HOME, file: `${KEYS_HOME} (localStorage)`, demo: true, keyError: keyError() }
 }
-route("GET", /^\/api\/settings$/, async () => ok(await settingsView()))
+route("GET", /^\/api\/settings$/, async () => { await ensureApiKey(KEY_OPTS); return ok(settingsView()) })
 route("PUT", /^\/api\/settings$/, async (req) => {
-  const b = await body<{ apiKey: string | null; createKey: boolean } & { [K in (typeof NUMS)[number]]: number | null }>(req)
+  const b = await body<{ apiKey: string | null; createKey: boolean; slippage: number | null }>(req)
   if (b.createKey === true) await replaceApiKey(KEY_OPTS) // the API's refusal (rate_limited, …) is thrown verbatim
   if (b.apiKey !== undefined) setApiKey(KEY_OPTS, typeof b.apiKey === "string" ? b.apiKey : null)
   const cur = load<BrowserSettings>(`${P}.settings`, {})
-  for (const k of NUMS) {
-    if (b[k] === undefined) continue
-    const v = b[k]
-    if (okNum(v)) cur[k] = v
-    else delete cur[k]
-  }
+  if (b.slippage !== undefined) { if (okNum(b.slippage)) cur.slippage = b.slippage; else delete cur.slippage }
   save(`${P}.settings`, cur)
-  return ok(await settingsView())
+  return ok(settingsView())
+})
+route("GET", /^\/api\/settings\/status$/, async () => {
+  const key = await ensureApiKey(KEY_OPTS)
+  const a = api()
+  const apiState: { configured: boolean; connected: boolean; url: string; keyPrefix?: string; error?: string; code?: string } = { configured: !!key, connected: false, url: a.url }
+  const main = walletStore.main()
+  let eth: number | null = null
+  if (key) {
+    try {
+      const me = await a.me()
+      apiState.connected = true
+      apiState.keyPrefix = me.keyPrefix
+      if (main) eth = await a.evm.account(main.publicKey).then((x) => Number(x.balanceEth)).catch(() => null)
+    } catch (e) {
+      apiState.error = e instanceof Error ? e.message : String(e)
+      if (e instanceof ApiError) apiState.code = e.code
+    }
+  } else {
+    const k = keyError()
+    if (k) { apiState.error = k.error; apiState.code = k.code }
+  }
+  return ok({ api: apiState, keyError: keyError(), funding: main ? { publicKey: main.publicKey, label: main.label, sol: eth, eth, backedUp: ks.isBackedUp(main.publicKey) } : null, backups: { dir: KEYS_HOME, wallets: ks.list().length, pending: ks.pending().length }, demo: true })
 })
 
 // launch
-route("GET", /^\/api\/launch$/, () => ok({ launches: readLaunches() }))
+const form = async (req: Request) => readForm(await body(req), settings().slippage)
+route("GET", /^\/api\/launch$/, () => ok({ launches: readLaunches().reverse() }))
 route("POST", /^\/api\/launch$/, async (req) => {
-  const form = await formOf(req)
-  const rec = launch.newRecord(form)
-  saveLaunch(rec) // listed (running) at once, so the log stream finds it
-  runInTab(rec, form)
-  return ok({ id: rec.id })
-})
-route("POST", /^\/api\/launch\/plan$/, async (req) => {
-  const { resolved, ...plan } = await launch.planWithBalances(env(), await formOf(req, true))
-  return ok({ ...plan, dev: resolved.dev.publicKey, exempt: resolved.exempt.length, wallets: { bundle: resolved.bundle, snipers: resolved.snipers, holders: resolved.holders } })
-})
-route("POST", /^\/api\/launch\/fund$/, async (req) => ok(await launch.fundPlan(env(), await formOf(req, true))))
-route("POST", /^\/api\/launch\/simulate$/, async (req) => { const e = env(); e.api.beginTrace(); const r = await launch.simulate(e, await formOf(req)); return ok({ ...r, calls: e.api.endTrace() }) })
-// the image: the visitor's FormData goes straight to POST /api/ipfs with their key; the create takes metadata.image
-route("POST", /^\/api\/launch\/image$/, async (req) => {
+  const f = await form(req)
+  const rec = launch.prepareLaunch(env(), f)
+  runInTab(rec, f)
+  return ok({ id: rec.id, events: `/api/launch/${rec.id}/events`, launch: rec })
+}, 400)
+route("POST", /^\/api\/launch\/plan$/, async (req) => ok(await launch.fundingPlan(env(), await form(req))))
+route("POST", /^\/api\/launch\/fund$/, async (req) => ok({ results: await launch.fundPlan(env(), await form(req)) }))
+route("POST", /^\/api\/launch\/simulate$/, async (req) => { const e = env(); e.api.beginTrace(); const r = await launch.simulateLaunch(e, await form(req)); return ok({ ...r, calls: e.api.endTrace() }) })
+route("GET", /^\/api\/launch\/([^/]+)$/, (_req, [id]) => { const rec = readLaunches().find((l) => l.id === id); return rec ? ok(rec) : fail(new Error("Launch not found"), 404) })
+
+// the AI coin and IPFS: the visitor's request goes straight to the API with their key
+route("POST", /^\/api\/ai\/coin$/, async (req) => ok(await api().aiCoin(await body<{ idea?: string; style?: "meme" | "mascot" | "clean" }>(req))))
+route("POST", /^\/api\/ipfs$/, async (req) => {
   const fd = await req.formData()
-  const file = fd.get("file")
-  if (!(file instanceof File) || !file.size) throw new RouteError("file: a PNG, JPG, GIF or WebP up to 4 MB")
+  if (!(fd.get("file") instanceof Blob)) throw new RouteError("file (png / jpg / gif / webp, up to 4 MB) is required")
+  if (!fd.get("name") || !fd.get("symbol")) throw new RouteError("name and symbol are required")
   const r = await api().uploadMetadata(fd)
-  const image = r.metadata?.image
-  if (!image) throw new RouteError("the API answered without metadata.image", 502)
-  return ok({ image, metadataUri: r.metadataUri })
+  if (!r.metadata?.image) throw new RouteError("the API answered without metadata.image", 502)
+  return ok(r)
 })
 
 // trading
 route("GET", /^\/api\/trading\/token$/, async (req) => {
-  const token = query(req, "token")
+  const token = coin(req)
   if (!isAddress(token)) throw new RouteError("token: a 0x address")
-  return ok(await api().rh.token(token))
+  return ok(await trading.tokenInfo(env(), token))
+})
+route("POST", /^\/api\/trading\/buy$/, async (req) => {
+  const b = await body<{ publicKey: string; token: string; mint: string; amount: number; eth: number }>(req)
+  const token = b.token ?? b.mint
+  if (!isAddress(b.publicKey) || !isAddress(token)) throw new RouteError("publicKey and token: 0x addresses")
+  const eth = num(b.amount ?? b.eth, 0)
+  if (!(eth > 0)) throw new RouteError("amount must be greater than zero")
+  return ok(await trading.buy(env(), canon(b.publicKey), token, eth))
+})
+route("POST", /^\/api\/trading\/sell$/, async (req) => {
+  const b = await body<{ publicKey: string; token: string; mint: string; percent: number }>(req)
+  const token = b.token ?? b.mint
+  if (!isAddress(b.publicKey) || !isAddress(token)) throw new RouteError("publicKey and token: 0x addresses")
+  return ok(await trading.sell(env(), canon(b.publicKey), token, num(b.percent, 100)))
+})
+route("POST", /^\/api\/trading\/sell-all$/, async (req) => {
+  const b = await body<{ publicKeys: string[]; token: string; mint: string; percent: number }>(req)
+  const token = b.token ?? b.mint
+  const wallets = targetsOf(b.publicKeys)
+  if (!wallets.length || !isAddress(token)) throw new RouteError("publicKeys (0x) and token (0x) are required")
+  return ok({ results: await trading.sellAll(env(), wallets, token, num(b.percent, 100)) })
 })
 route("GET", /^\/api\/trading\/creator-fees$/, async (req) => {
-  const token = query(req, "token")
+  const token = coin(req)
   if (!isAddress(token)) throw new RouteError("token: a 0x address")
   return ok(await trading.creatorFees(env(), token))
 })
 route("POST", /^\/api\/trading\/creator-fees$/, async (req) => {
-  const b = await body<{ token: string }>(req)
-  if (!isAddress(b.token)) throw new RouteError("token: a 0x address")
-  return ok(await trading.collectCreatorFees(env(), b.token))
-})
-route("GET", /^\/api\/trading\/holdings$/, async (req) => {
-  const token = query(req, "token")
+  const b = await body<{ token: string; mint: string }>(req)
+  const token = b.token ?? b.mint
   if (!isAddress(token)) throw new RouteError("token: a 0x address")
-  return ok({ token, creator: trading.creatorOf(env(), token), holdings: await trading.holdings(env(), token) })
+  return ok(await trading.collectCreatorFees(env(), token))
+})
+route("GET", /^\/api\/trading\/pnl$/, async (req) => {
+  const token = coin(req)
+  if (!isAddress(token)) throw new RouteError("token: a 0x address")
+  return ok(await trading.pnl(env(), token))
 })
 route("GET", /^\/api\/trading\/quote$/, async (req) => {
-  const token = query(req, "token"), wallet = query(req, "wallet") ?? undefined
+  const token = coin(req), wallet = query(req, "wallet") ?? undefined
   const action = query(req, "action") === "sell" ? "sell" : "buy"
   const amount = num(query(req, "amount"), 0)
   if (!isAddress(token)) throw new RouteError("token: a 0x address")
   if (!(amount > 0)) throw new RouteError("amount must be greater than zero")
-  return ok(await api().rh.quote({ token, action, amount, wallet: isAddress(wallet) ? wallet : undefined }))
+  return ok(await api().evm.quote({ token, action, amount, wallet: isAddress(wallet) ? wallet : undefined }))
 })
-route("POST", /^\/api\/trading\/buy$/, async (req) => {
-  const b = await body<{ publicKey: string; token: string; amount: number; eth: number }>(req)
-  if (!isAddress(b.publicKey) || !isAddress(b.token)) throw new RouteError("publicKey and token: 0x addresses")
-  const eth = num(b.amount ?? b.eth, 0)
-  if (!(eth > 0)) throw new RouteError("amount must be greater than zero")
-  return ok(await trading.buy(env(), canon(b.publicKey), b.token, eth))
-})
-route("POST", /^\/api\/trading\/sell$/, async (req) => {
-  const b = await body<{ publicKey: string; token: string; percent: number }>(req)
-  if (!isAddress(b.publicKey) || !isAddress(b.token)) throw new RouteError("publicKey and token: 0x addresses")
-  return ok(await trading.sell(env(), canon(b.publicKey), b.token, num(b.percent, 100)))
-})
-route("POST", /^\/api\/trading\/sell-all$/, async (req) => {
-  const b = await body<{ publicKeys: string[]; token: string; percent: number }>(req)
-  const wallets = targetsOf(b.publicKeys)
-  if (!wallets.length || !isAddress(b.token)) throw new RouteError("publicKeys (0x) and token (0x) are required")
-  for (const pk of wallets) walletStore.assertBackedUp(pk)
-  return ok({ results: await trading.sellAll(env(), wallets, b.token, num(b.percent, 100)) })
-})
-route("GET", /^\/api\/trading\/timers$/, (req) => ok({ timers: forToken(readTimers(), query(req, "token")) }))
+route("GET", /^\/api\/trading\/timers$/, (req) => ok({ now: Date.now(), timers: forToken(readTimers(), coin(req) || null) }))
 route("POST", /^\/api\/trading\/timers$/, async (req) => {
-  const b = await body<{ token: string; publicKeys: string[]; percent: number; minutes: number }>(req)
+  const b = await body<{ token: string; mint: string; publicKeys: string[]; percent: number; minutes: number }>(req)
+  const token = b.token ?? b.mint
   const wallets = targetsOf(b.publicKeys)
-  if (!isAddress(b.token) || !wallets.length) throw new RouteError("token (0x) and publicKeys (0x) are required")
+  if (!isAddress(token) || !wallets.length) throw new RouteError("token (0x) and publicKeys (0x) are required")
   for (const pk of wallets) walletStore.assertBackedUp(pk) // a rule for an unbacked wallet is refused when it is made, not when it fires
-  const timer = newTimerRule({ token: b.token, publicKeys: wallets, percent: num(b.percent, 100), minutes: num(b.minutes, 0) })
-  saveTimer(timer)
-  return ok({ timer })
-})
+  const rule = newTimerRule({ token, publicKeys: wallets, percent: num(b.percent, 100), minutes: num(b.minutes, 5) })
+  saveTimer(rule)
+  return ok(rule)
+}, 400)
+const cancelTimer = (id: string) => {
+  const rule = readTimers().find((r) => r.id === id)
+  if (!rule) return fail(new Error("Timer not found"), 404)
+  if (rule.status === "pending") { rule.status = "cancelled"; saveTimer(rule) }
+  return ok(rule)
+}
 route("DELETE", /^\/api\/trading\/timers$/, (req) => {
   const id = query(req, "id")
-  if (!id) {
-    const keep = readTimers().filter((r) => !isFinished(r))
-    const cleared = readTimers().length - keep.length
-    save(`${P}.timers`, keep)
-    return ok({ cleared })
-  }
-  const rule = readTimers().find((r) => r.id === id)
-  if (!rule) return fail(new Error("no such timer"), 404)
-  if (rule.status === "pending") { rule.status = "cancelled"; saveTimer(rule) }
-  return ok({ timer: rule })
+  if (id) return cancelTimer(id)
+  const keep = readTimers().filter((r) => !isFinished(r))
+  const cleared = readTimers().length - keep.length
+  save(`${P}.timers`, keep)
+  return ok({ cleared })
 })
+route("DELETE", /^\/api\/trading\/timers\/([^/]+)$/, (_req, [id]) => cancelTimer(decodeURIComponent(id)))
 
 /** One request → the route's Response (404 for an unknown path, the API's error shape for every failure). */
 export async function handle(req: Request): Promise<Response> {
   const path = new URL(req.url).pathname
+  // a first visit: the visitor's key is still being made; every route waits for it (instant once it exists)
+  await ensureApiKey(KEY_OPTS).catch(() => null)
   for (const [method, pattern, h, failStatus] of routes) {
     if (method !== req.method) continue
     const m = pattern.exec(path)
@@ -474,50 +500,88 @@ export async function handle(req: Request): Promise<Response> {
 
 // ── event streams (the server's sse routes) ─────────────────────────────────
 
-/** GET /api/launch/:id/log: the log so far, then every new entry until one says done. */
-function launchLog(id: string): EventStream {
+/** GET /api/launch/:id/events: the log so far, then every new stage until done / error. */
+function launchEvents(id: string): EventStream {
   return (send, close) => {
-    const history = entriesOf(id)
+    const history = eventsOf(id)
     for (const e of history) send(e)
     const rec = readLaunches().find((l) => l.id === id)
-    if (!rec) { send({ t: Date.now(), stage: "failed", msg: "no such launch in this browser; see the launch records", level: "error", done: true }); close(); return () => {} }
-    if (history.some((e) => e.done) || (rec.status !== "running" && !history.length)) {
-      if (!history.length) send({ t: Date.now(), stage: rec.status, msg: rec.error ?? `Launch ${rec.status}`, level: rec.status === "failed" ? "error" : "ok", done: true })
+    if (!rec) { send({ at: Date.now(), stage: "error", message: "Launch not found" }); close(); return () => {} }
+    const finished = (stage: string) => stage === "done" || stage === "error"
+    if (history.some((e) => finished(e.stage)) || (rec.status !== "running" && !history.length)) {
+      if (!history.length) send({ at: Date.now(), stage: rec.status === "error" ? "error" : "done", message: rec.error ?? `Launch ${rec.status}`, token: rec.token ?? undefined })
       close()
       return () => {}
     }
-    return subscribeLaunch(id, (e) => { send(e); if (e.done) close() })
+    return subscribeLaunch(id, (e) => { send(e); if (finished(e.stage)) close() })
   }
 }
 
-/** GET /api/trading/feed?token=0x…: the API websocket (wss://…/api/rh/data?api-key=…) opened from this tab. */
+/**
+ * GET /api/trading/feed on a chain the API does not stream (lib/chain.ts evm.ws false): the history once, then
+ * GET <api>/trades?fromBlock= every 2.5 s for what is new (one small call a poll).
+ */
+function pollFeed(token: string): EventStream {
+  return (send) => {
+    let stopped = false
+    let head = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const seen = new Set<string>()
+    const ours = (trader: string) => walletStore.get(trader) ?? undefined
+    const take = (raws: Array<Record<string, unknown>>) => {
+      const out: NonNullable<ReturnType<typeof trading.parseTrade>>[] = []
+      for (const raw of raws) { const t = trading.parseTrade(JSON.stringify(raw), token, ours); if (t && !seen.has(t.hash)) { seen.add(t.hash); out.push(t) } }
+      return out
+    }
+    const tick = async () => {
+      if (stopped) return
+      const a = api()
+      if (a.configured) {
+        try {
+          const h = await a.evm.tradeHistory(token, head ? 50 : 100, head ? head + 1 : undefined)
+          const fresh = take(h.trades)
+          if (!head) send({ type: "initial", trades: fresh })
+          else for (const t of fresh.reverse()) send({ type: "trade", trade: t }) // oldest first
+          if (h.head) head = h.head
+        } catch { /* the next poll tries again */ }
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), 2500)
+    }
+    send({ type: "initial", trades: [] })
+    void tick()
+    return () => { stopped = true; if (timer) clearTimeout(timer) }
+  }
+}
+
+/** GET /api/trading/feed?token=0x…: the API websocket (wss://…/api/<chain>/data?api-key=…) opened from this tab. */
 function tradeFeed(token: string): EventStream {
+  if (!chain.evm?.ws) return pollFeed(token)
   return (send) => {
     let ws: WebSocket | null = null
     let stopped = false
     let retry: ReturnType<typeof setTimeout> | null = null
     let first = true
     const seen = new Set<string>()
+    const ours = (trader: string) => walletStore.get(trader) ?? undefined
     const connect = () => {
       const a = api()
       if (!a.configured) { retry = setTimeout(connect, 3000); return } // the key is still being created
       ws = new WebSocket(a.wsUrl())
       ws.onopen = () => {
-        ws?.send(trading.subscribeMessage(token))
+        ws?.send(trading.tradeSubscription(token))
         if (first) {
           first = false
-          send({ type: "snapshot", trades: [] })
+          send({ type: "initial", trades: [] })
           // the history (GET /api/rh/trades): the dev buy and the bundle, everything before this tab subscribed
-          void a.rh.tradeHistory(token, 100).then((h) => {
+          void a.evm.tradeHistory(token, 100).then((h) => {
             const trades: ReturnType<typeof trading.parseTrade>[] = []
-            const wallets = walletStore.list()
-            for (const raw of h.trades) { const t = trading.parseTrade(JSON.stringify(raw), token, wallets); if (t && !seen.has(t.hash)) { seen.add(t.hash); trades.push(t) } }
-            if (!stopped) send({ type: "snapshot", trades })
+            for (const raw of h.trades) { const t = trading.parseTrade(JSON.stringify(raw), token, ours); if (t && !seen.has(t.hash)) { seen.add(t.hash); trades.push(t) } }
+            if (!stopped) send({ type: "initial", trades })
           }).catch(() => {})
         }
       }
       ws.onmessage = (m) => {
-        const t = trading.parseTrade(String(m.data), token, walletStore.list())
+        const t = trading.parseTrade(String(m.data), token, ours)
         if (!t || seen.has(t.hash)) return
         seen.add(t.hash)
         send({ type: "trade", trade: t })
@@ -531,10 +595,10 @@ function tradeFeed(token: string): EventStream {
 
 /** The event stream of a path, or null when it has none. */
 export function stream(url: URL): EventStream | null {
-  const m = /^\/api\/launch\/([^/]+)\/log$/.exec(url.pathname)
-  if (m) return launchLog(decodeURIComponent(m[1]))
-  if (url.pathname === "/api/trading/feed") {
-    const token = url.searchParams.get("token") || ""
+  const m = /^\/api\/launch\/([^/]+)\/(events|log)$/.exec(url.pathname)
+  if (m) return launchEvents(decodeURIComponent(m[1]))
+  if (/^\/api\/trading\/(feed|trades)$/.test(url.pathname)) {
+    const token = url.searchParams.get("token") || url.searchParams.get("mint") || ""
     return isAddress(token) ? tradeFeed(token) : null
   }
   return null

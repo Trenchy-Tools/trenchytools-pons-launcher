@@ -4,8 +4,10 @@
  *
  *   { publicKey (0x address), privateKey (0x hex), chain: "rh", role, label, createdAt, app }
  */
-export const APP_NAME = "trenchytools-pons-starter"
-export const CHAIN = "rh"
+import { chain } from "../chain"
+export const APP_NAME = `trenchytools-${chain.suiteId}-starter`
+/** the chain tag of this app's wallet files ("rh", "bnb", "elysium", "base"): the folder is shared by every starter */
+export const CHAIN = chain.evm!.transferChain
 export const ROLES = ["funding", "bundle", "sniper", "holder", "trader"] as const
 export type Role = (typeof ROLES)[number]
 export const isRole = (v: unknown): v is Role => typeof v === "string" && (ROLES as readonly string[]).includes(v)
@@ -15,7 +17,7 @@ export type WalletFile = { publicKey: string; privateKey: string; chain: string;
 export type WalletInfo = Omit<WalletFile, "privateKey"> & { file: string }
 
 /** The note written into every wallet file / backup download. */
-export const KEEP_NOTE = "Keep this file. Anyone with privateKey controls the wallet. Robinhood Chain (EVM, chain id 4663)."
+export const KEEP_NOTE = `Keep this file. Anyone with privateKey controls the wallet. ${chain.name} (EVM, chain id ${chain.evm!.chainId}).`
 
 /** Two 0x addresses are the same wallet whatever their letter case (checksummed or not). */
 export const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
@@ -55,3 +57,6 @@ export function parseCsvLine(line: string): string[] {
   cells.push(cur)
   return cells
 }
+
+/** The name of a wallet made for a launch: the coin and the job ("LASER bundle", numbered when several: "LASER bundle 2"). */
+export const launchWalletLabel = (symbol: string | undefined, role: string) => `${(symbol ?? "").trim().slice(0, 12)} ${role === "holder" ? "later buyer" : role}`.trim()

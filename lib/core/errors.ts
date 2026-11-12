@@ -1,3 +1,5 @@
+import { chain } from "../chain"
+import { suiteItem } from "../suite"
 /**
  * The errors every flow can throw, and the one JSON shape they leave the app in. Shared by the server routes
  * (lib/http.ts, local mode) and the browser engine (lib/browser/engine.ts, demo mode). No node imports.
@@ -62,5 +64,5 @@ export function errorBody(err: unknown, status?: number): { status: number; body
 export const DEMO_MODE_BODY = {
   error: "This hosted demo keeps no server state: wallets, launches and trades run in your browser.",
   code: "demo_mode",
-  hint: "Use the pages of this app (they call the TrenchyTools API straight from the browser), or clone the repo to run it on your own machine: https://github.com/Trenchy-Tools/trenchytools-pons-launcher",
+  hint: "Use the pages of this app (they call the TrenchyTools API straight from the browser), or clone the repo to run it on your own machine: " + (suiteItem(chain.suiteId)?.repo ?? "https://github.com/Trenchy-Tools"),
 }

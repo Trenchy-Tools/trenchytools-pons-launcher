@@ -1,4 +1,4 @@
-/* Site theme: neutral zinc, dark-first. Same tokens as the TrenchyTools docs (apps/docs/apps/web/app/site.css). Fonts are set in app/layout.tsx. */
+/* Theme copied from the TrenchyTools docs site (apps/docs/apps/web/app/site.css): neutral zinc, dark-first. */
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
@@ -20,8 +20,8 @@
   --accent: #f4f4f5;
   --accent-foreground: #0b0b0c;
   --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: #ffffff;
   --ok: oklch(0.55 0.15 150);
+  --brand: #c2500a; /* the accent: buttons, the main wallet, our trades, flashes */
   --warn: oklch(0.68 0.16 70);
   --border: #e6e6e9;
   --input: #e6e6e9;
@@ -46,8 +46,8 @@
   --accent: #1a1a1d;
   --accent-foreground: #ededed;
   --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: #0b0b0c;
   --ok: oklch(0.78 0.14 150);
+  --brand: #ff9a4d;
   --warn: oklch(0.8 0.14 80);
   --border: #212125;
   --input: #2a2a2e;
@@ -70,35 +70,88 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
   --color-ok: var(--ok);
+  --color-brand: var(--brand);
   --color-warn: var(--warn);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --font-sans: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* fonts are loaded in app/layout.tsx with next/font */
+  --font-sans: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    scroll-padding-top: 5rem;
+  }
   body {
     @apply bg-background text-foreground;
+    letter-spacing: -0.01em;
   }
-  code, kbd, samp, pre {
+  code,
+  kbd,
+  samp,
+  pre {
     font-family: var(--font-mono);
   }
-  input[type="number"]::-webkit-inner-spin-button {
-    opacity: 0.4;
+  ::selection {
+    background: color-mix(in oklab, var(--foreground) 18%, transparent);
   }
 }
 
-::selection {
-  background: color-mix(in oklab, var(--foreground) 20%, transparent);
+/* Attention, gently (components/ui/motion.tsx): a number shakes when it changes; a line shakes in when it appears and
+   fades out when it goes. Off for people who ask their system for less motion. */
+@keyframes tt-nudge {
+  0% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1px); }
+  80% { transform: translateX(1px); }
+  100% { transform: translateX(0); }
+}
+@keyframes tt-in {
+  0% { opacity: 0; transform: translateX(-6px); }
+  45% { opacity: 1; transform: translateX(3px); }
+  65% { transform: translateX(-2px); }
+  85% { transform: translateX(1px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+@keyframes tt-out {
+  0% { opacity: 1; max-height: 4em; }
+  100% { opacity: 0; max-height: 0; transform: translateX(8px); margin-top: 0; margin-bottom: 0; }
+}
+/* the "?" of an option that was just switched on */
+@keyframes tt-wiggle {
+  0% { transform: rotate(0) scale(1); box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 60%, transparent); }
+  100% { transform: rotate(0) scale(1); box-shadow: 0 0 0 10px transparent; }
+  10% { transform: rotate(-18deg) scale(1.35); }
+  20% { transform: rotate(16deg) scale(1.35); }
+  30% { transform: rotate(-14deg) scale(1.3); }
+  40% { transform: rotate(12deg) scale(1.25); }
+  50% { transform: rotate(-8deg) scale(1.2); }
+  60% { transform: rotate(6deg) scale(1.15); }
+  70% { transform: rotate(-3deg) scale(1.1); }
+}
+/* a line that just changed: a wash of the brand colour that fades */
+@keyframes tt-flash {
+  0% { background-color: color-mix(in oklab, var(--brand) 30%, transparent); color: var(--brand); }
+  100% { background-color: transparent; }
+}
+.tt-flash { border-radius: 4px; animation: tt-flash 1.4s ease-out; }
+.tt-wiggle { animation: tt-wiggle 0.9s ease-in-out; }
+.tt-nudge { display: inline-block; animation: tt-nudge 0.35s ease-out; }
+.tt-in { animation: tt-in 0.45s ease-out both; }
+.tt-out { overflow: hidden; animation: tt-out 0.3s ease-in forwards; }
+@media (prefers-reduced-motion: reduce) {
+  .tt-nudge, .tt-in, .tt-out, .tt-wiggle, .tt-flash { animation: none; }
 }

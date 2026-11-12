@@ -8,7 +8,7 @@
  *                                 { publicKey, privateKey, chain, role, label, createdAt, app }
  *   <prefix>.backedUp             { [publicKey]: ISO time the key was downloaded }
  *   <prefix>.archived             { [publicKey]: ISO time it was archived }   (kept, never listed, never used)
- *   <prefix>.main                 the ★ wallet's public key
+ *   <prefix>.main                 the main wallet's public key
  *
  * THE BACKUP RULE (non-negotiable): a wallet is created NOT backed up. Until its key has been downloaded it cannot be
  * funded, used in a launch, traded or gathered: `assertBackedUp` / `signerSecret` throw NotBackedUpError (409
@@ -105,6 +105,17 @@ export function createKeystore(o: { prefix: string; chain: string; app: string; 
     return records().filter((r) => !a[r.publicKey]).map((r) => view(r, b))
   }
   const archivedCount = () => records().filter((r) => archivedMap()[r.publicKey]).length
+  /** Archived wallets, oldest first (their keys are kept and can be restored). */
+  const archivedList = (): Array<KeyView & { archivedAt: string }> => { const a = archivedMap(), b = backedUpMap(); return records().filter((r) => a[r.publicKey]).map((r) => ({ ...view(r, b), archivedAt: a[r.publicKey] })) }
+  /** Bring archived wallets back into the list. Returns the ones restored. */
+  function unarchive(publicKeys: string[]): string[] {
+    const a = archivedMap()
+    const done = publicKeys.filter((pk) => a[pk])
+    for (const pk of done) delete a[pk]
+    write(K.archived, a)
+    changed()
+    return done
+  }
   /** A usable wallet (archived ones are not). */
   const get = (publicKey: string): KeyView | null => (archivedMap()[publicKey] ? null : (() => { const r = record(publicKey); return r ? view(r) : null })())
   /** Every wallet ever stored here, archived ones included: label numbers never repeat. */
@@ -143,12 +154,13 @@ export function createKeystore(o: { prefix: string; chain: string; app: string; 
   }
 
   /** Archive: kept (and in every backup / export), never listed or used again. The ★ wallet is refused. */
-  function archive(publicKeys: string[]): string[] {
+  /** `allowMain`: the main wallet may go too (the "Archive this main wallet" / "Replace" actions); then there is none. */
+  function archive(publicKeys: string[], allowMain = false): string[] {
     const m = main()
     const a = archivedMap()
     const done: string[] = []
     for (const pk of publicKeys) {
-      if (m && pk === m) throw new Error("The dev wallet cannot be removed; make another wallet the dev wallet first")
+      if (m && pk === m && !allowMain) throw new Error("The main wallet cannot be removed; make another wallet the main wallet first")
       if (!record(pk) || a[pk]) continue
       a[pk] = new Date().toISOString()
       done.push(pk)
@@ -215,5 +227,5 @@ export function createKeystore(o: { prefix: string; chain: string; app: string; 
     return { count: rs.length, files }
   }
 
-  return { list, get, add, update, main, setMain, archive, archivedCount, seen, isBackedUp, assertBackedUp, signerSecret, secrets, pending, downloadBackup, exportAll, missing }
+  return { list, get, add, update, main, setMain, archive, archivedCount, archivedList, unarchive, seen, isBackedUp, assertBackedUp, signerSecret, secrets, pending, downloadBackup, exportAll, missing }
 }

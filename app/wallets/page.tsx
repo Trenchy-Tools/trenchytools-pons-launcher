@@ -12,7 +12,9 @@
  * This file is the same in the pump.fun and pons starters; lib/chain.ts holds what differs.
  */
 import * as React from "react"
-import { Check, Copy, Ellipsis, ExternalLink, RefreshCw, X } from "lucide-react"
+import { Check, Copy, Ellipsis, RefreshCw, X } from "lucide-react"
+import { BrandIcon } from "@/components/ui/brand"
+import { ask } from "@/components/ui/confirm"
 import { DevWalletCard } from "@/components/dev-wallet-card"
 import { FailureBox } from "@/components/failure"
 import { Button } from "@/components/ui/button"
@@ -24,6 +26,7 @@ import { toast, toastFailure } from "@/components/ui/toast"
 import { copyText, downloadText, failureOf, get, post, readChosenCoin, walletsChanged, writeChosenCoin, type ChosenCoin, type Failure } from "@/lib/api"
 import { chain } from "@/lib/chain"
 import { DEMO } from "@/lib/browser/demo"
+import { Q } from "@/lib/help"
 
 type Wallet = { publicKey: string; label: string; role: string; createdAt: string; file: string }
 /** `pending`: demo mode only, the wallets whose key has not been downloaded yet (not usable until it is). */
@@ -32,6 +35,7 @@ type Row = { publicKey: string; native: number; tokens?: number }
 type Venues = { exchange: string; venues: Record<string, { status: string; reason?: string; default?: boolean }> }
 /** One exchange leg, as either starter's fund-exchange route answers it (`signature` on Solana, `depositHash` on EVM). */
 type Leg = { publicKey: string; transferId?: string; status?: string; venue?: string | null; error?: string; code?: string; receipt?: string; signature?: string; depositHash?: string }
+type Archived = { publicKey: string; label: string; createdAt: string; archivedAt?: string; native: number | null }
 type Sent = { publicKey: string; signature?: string; hash?: string; error?: string; code?: string; skipped?: string; recovered?: number; eth?: number }
 
 const LEG_FINAL = ["completed", "failed", "expired", "refunded", "cancelled"]
@@ -46,6 +50,8 @@ export default function WalletsPage() {
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
   const [venues, setVenues] = React.useState<Venues | null>(null)
   const [legs, setLegs] = React.useState<Leg[]>([])
+  const [archived, setArchived] = React.useState<Archived[] | null>(null)
+  const [archivedOpen, setArchivedOpen] = React.useState(false)
 
   const [newCount, setNewCount] = React.useState("3")
   const [importOpen, setImportOpen] = React.useState(false)
@@ -79,6 +85,8 @@ export default function WalletsPage() {
       const f = await get<Folder>("/api/wallets")
       setFolder(f)
       setFailure(null)
+      if (f.archived) get<{ wallets: Archived[] }>("/api/wallets/archived").then((r) => setArchived(r.wallets)).catch(() => {})
+      else setArchived([])
       if (withBalances && f.wallets.length) {
         const c = readChosenCoin()
         const r = await get<{ rows: Row[] }>(`/api/wallets/balances${c?.coin ? `?${chain.coinParam}=${encodeURIComponent(c.coin)}` : ""}`).catch((e) => { setFailure(failureOf(e)); return { rows: [] as Row[] } })
@@ -115,7 +123,10 @@ export default function WalletsPage() {
     setBusy(name)
     try { await fn() } catch (e) { toastFailure(failureOf(e)) } finally { setBusy(null) }
   }
-  const changed = async () => { await load(); walletsChanged() }
+  /** After an action: balances right away, then again at 2.5 s and 7 s, because the chain needs a moment to show a transfer. */
+  const later = () => { setTimeout(() => void load(), 2500); setTimeout(() => { void load(); walletsChanged() }, 7000) }
+  const refreshAfter = () => { void load(); walletsChanged(); later() }
+  const changed = async () => { await load(); walletsChanged(); later() }
   const toggle = (pk: string) => setSelected((s) => { const n = new Set(s); if (n.has(pk)) n.delete(pk); else n.add(pk); return n })
   const tx = (x: Sent) => x.signature ?? x.hash
   const sentLines = (results: Sent[], word: (x: Sent) => React.ReactNode) => (
@@ -147,7 +158,7 @@ export default function WalletsPage() {
   })
   const makeDev = (pk: string) => run(`dev:${pk}`, async () => {
     await post("/api/wallets/main", { publicKey: pk })
-    toast({ tone: "ok", title: `${buyers.find((w) => w.publicKey === pk)?.label ?? "That wallet"} is now the dev wallet` })
+    toast({ tone: "ok", title: `${buyers.find((w) => w.publicKey === pk)?.label ?? "That wallet"} is now the main wallet` })
     await changed()
   })
   const saveEdit = () => run("rename", async () => {
@@ -163,17 +174,17 @@ export default function WalletsPage() {
     const r = await post<{ results: Sent[] }>("/api/wallets/fund", { publicKeys, amount: a })
     setFunding(null)
     const failed = r.results.filter((x) => x.error).length
-    toast({ tone: failed ? "error" : "ok", sticky: failed > 0, title: `Funded ${r.results.length - failed}/${r.results.length} wallet${r.results.length === 1 ? "" : "s"} · ${a} ${chain.symbol} each from the dev wallet`, detail: sentLines(r.results, () => <span>+{a} {chain.symbol}</span>) })
-    await load()
+    toast({ tone: failed ? "error" : "ok", sticky: failed > 0, title: `Funded ${r.results.length - failed}/${r.results.length} wallet${r.results.length === 1 ? "" : "s"} · ${a} ${chain.symbol} each from the main wallet`, detail: sentLines(r.results, () => <span>+{a} {chain.symbol}</span>) })
+    refreshAfter()
   })
   const collect = () => run("collect", async () => {
     if (!targets.length) throw { error: "No buyer wallets to collect from" }
-    if (!window.confirm(`Send everything from ${scope} buyer wallet${targets.length === 1 ? "" : "s"} back to the dev wallet?`)) return
+    if (!await ask(`Send everything from ${scope} buyer wallet${targets.length === 1 ? "" : "s"} back to the main wallet?`)) return
     const r = await post<{ to: string; results: Sent[] }>("/api/wallets/gather", { publicKeys: targets })
     const got = r.results.reduce((s, x) => s + (x.recovered ?? x.eth ?? 0), 0)
     const failed = r.results.filter((x) => x.error).length
-    toast({ tone: failed ? "error" : "ok", sticky: failed > 0, title: `Collected ${chain.fmt(got)} ${chain.symbol} into the dev wallet`, detail: sentLines(r.results, (x) => <span>{chain.fmt(x.recovered ?? x.eth)} {chain.symbol}</span>) })
-    await load()
+    toast({ tone: failed ? "error" : "ok", sticky: failed > 0, title: `Collected ${chain.fmt(got)} ${chain.symbol} into the main wallet`, detail: sentLines(r.results, (x) => <span>{chain.fmt(x.recovered ?? x.eth)} {chain.symbol}</span>) })
+    refreshAfter()
   })
   const fundViaExchange = () => run("exchange", async () => {
     const a = Number(each)
@@ -181,8 +192,8 @@ export default function WalletsPage() {
     const r = await post<{ batchId?: string; legs: Leg[] }>("/api/wallets/fund-exchange", { publicKeys: targets, amount: a, mode, venue })
     setLegs(r.legs)
     const failed = r.legs.filter((l) => l.error).length
-    toast({ tone: failed ? "error" : "ok", sticky: failed > 0, title: `Fund via exchange: ${r.legs.length - failed}/${r.legs.length} order${r.legs.length === 1 ? "" : "s"} opened · ${a} ${chain.symbol} each`, detail: failed ? r.legs.filter((l) => l.error).map((l) => `${chain.short(l.publicKey)}: ${l.error}${l.code ? ` · ${l.code}` : ""}`).join("; ") : "Each wallet is paid by an exchange, not by the dev wallet. The list below updates until they complete." })
-    await load()
+    toast({ tone: failed ? "error" : "ok", sticky: failed > 0, title: `Fund via exchange: ${r.legs.length - failed}/${r.legs.length} order${r.legs.length === 1 ? "" : "s"} opened · ${a} ${chain.symbol} each`, detail: failed ? r.legs.filter((l) => l.error).map((l) => `${chain.short(l.publicKey)}: ${l.error}${l.code ? ` · ${l.code}` : ""}`).join("; ") : "Each wallet is paid by an exchange, not by the main wallet. The list below updates until they complete." })
+    refreshAfter()
   })
   const sendDirect = (amount: string | "max") => run("send", async () => {
     const to = sendTo.trim()
@@ -191,39 +202,44 @@ export default function WalletsPage() {
     if (a !== "max" && !(a > 0)) throw { error: `Enter the ${chain.symbol} amount each wallet sends, or press Send everything` }
     const from = targets.filter((pk) => pk.toLowerCase() !== to.toLowerCase())
     if (!from.length) throw { error: "The only wallet is the destination" }
-    if (!window.confirm(`Send ${a === "max" ? "everything (minus the fee)" : `${a} ${chain.symbol}`} from ${from.length} wallet${from.length === 1 ? "" : "s"} to ${chain.short(to)}?`)) return
+    if (!await ask(`Send ${a === "max" ? "everything (minus the fee)" : `${a} ${chain.symbol}`} from ${from.length} wallet${from.length === 1 ? "" : "s"} to ${chain.short(to)}?`)) return
     const r = await post<{ to: string; results: Sent[] }>("/api/wallets/send", { publicKeys: from, to, amount: a })
     const sent = r.results.reduce((s, x) => s + (x.recovered ?? x.eth ?? 0), 0)
     const failed = r.results.filter((x) => x.error).length
     toast({ tone: failed ? "error" : "ok", sticky: failed > 0, title: `Sent ${chain.fmt(sent)} ${chain.symbol} to ${chain.short(to)}`, detail: sentLines(r.results, (x) => <span>{chain.fmt(x.recovered ?? x.eth ?? 0)} {chain.symbol}</span>) })
-    await load()
+    refreshAfter()
   })
   const closeAccounts = () => run("close", async () => {
     const r = await post<{ totalClosed: number; results: Array<{ publicKey: string; closed: number; error?: string }> }>("/api/wallets/close-accounts", { publicKeys: targets })
     const failed = r.results.filter((x) => x.error)
-    toast({ tone: failed.length ? "error" : "ok", sticky: failed.length > 0, title: `Closed ${r.totalClosed} empty token account${r.totalClosed === 1 ? "" : "s"}; the rent went to the dev wallet`, detail: failed.length ? failed.map((x) => `${chain.short(x.publicKey)}: ${x.error}`).join("; ") : undefined })
-    await load()
+    toast({ tone: failed.length ? "error" : "ok", sticky: failed.length > 0, title: `Closed ${r.totalClosed} empty token account${r.totalClosed === 1 ? "" : "s"}; the rent went to the main wallet`, detail: failed.length ? failed.map((x) => `${chain.short(x.publicKey)}: ${x.error}`).join("; ") : undefined })
+    refreshAfter()
   })
   const showKey = (pk: string) => run(`key:${pk}`, async () => {
     if (shownKey?.publicKey === pk) { setShownKey(null); return }
-    if (!window.confirm(`Show the ${chain.keyNoun} of this wallet on screen?\n\nAnyone who sees it controls the wallet.`)) return
+    if (!await ask(`Show the ${chain.keyNoun} of this wallet on screen?\n\nAnyone who sees it controls the wallet.`)) return
     const r = await post<{ wallets: Array<{ publicKey: string; privateKey: string }> }>("/api/wallets/export", { publicKeys: [pk] })
     setShownKey({ publicKey: pk, privateKey: r.wallets[0].privateKey })
   })
   const exportKeys = () => run("export", async () => {
     const pks = [...(main ? [main] : []), ...targets]
-    if (!window.confirm(`Download the ${chain.keyNoun}s of ${pks.length} wallet${pks.length === 1 ? "" : "s"} as a file?\n\nAnyone with the file controls the wallets.`)) return
+    if (!await ask(`Download the ${chain.keyNoun}s of ${pks.length} wallet${pks.length === 1 ? "" : "s"} as a file?\n\nAnyone with the file controls the wallets.`)) return
     const r = await post<{ wallets: Array<{ publicKey: string; privateKey: string; label: string }> }>("/api/wallets/export", { publicKeys: pks })
     downloadText(`wallet-keys-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`, JSON.stringify(r.wallets.map((w) => ({ label: w.label, publicKey: w.publicKey, privateKey: w.privateKey, chain: chain.name })), null, 2))
     toast({ tone: "ok", title: `Downloaded ${r.wallets.length} key${r.wallets.length === 1 ? "" : "s"}` })
   })
   const archive = (pks: string[]) => run("archive", async () => {
     const holding = pks.filter((pk) => (row(pk)?.native ?? 0) > 0)
-    const msg = `Remove ${pks.length} wallet${pks.length === 1 ? "" : "s"} from this list?\n\nThe keys are kept (archived), nothing is deleted.` + (holding.length ? `\n\n${holding.length} of them still hold ${chain.symbol}: Collect first if you want it back.` : "")
-    if (!window.confirm(msg)) return
+    const msg = `Archive ${pks.length} wallet${pks.length === 1 ? "" : "s"}?\n\nThey leave the list and are never used; the keys are kept, nothing is deleted. Restore them any time under Archived wallets.` + (holding.length ? `\n\n${holding.length} of them still hold ${chain.symbol}: Collect first if you want it back.` : "")
+    if (!await ask(msg)) return
     const r = await post<{ archived: string[] }>("/api/wallets/archive", { publicKeys: pks })
     setSelected(new Set())
     toast({ tone: "ok", title: `Archived ${r.archived.length} wallet${r.archived.length === 1 ? "" : "s"}` })
+    await changed()
+  })
+  const restore = (pks: string[]) => run(`restore:${pks.join(",")}`, async () => {
+    const r = await post<{ restored: string[] }>("/api/wallets/unarchive", { publicKeys: pks })
+    toast({ tone: "ok", title: `Restored ${r.restored.length} wallet${r.restored.length === 1 ? "" : "s"}`, detail: "They are back in the list and can be funded, traded and collected." })
     await changed()
   })
   const rewrite = () => run("rewrite", async () => {
@@ -237,7 +253,7 @@ export default function WalletsPage() {
     await changed()
   })
   const exportAll = () => run("export-all", async () => {
-    if (!window.confirm(`Download every ${chain.keyNoun} stored in this browser?\n\nAnyone with the file controls the wallets.`)) return
+    if (!await ask(`Download every ${chain.keyNoun} stored in this browser?\n\nAnyone with the file controls the wallets.`)) return
     const r = await post<{ count: number; files: string[] }>("/api/wallets/export-all")
     toast({ tone: "ok", title: `Downloaded ${r.count} key${r.count === 1 ? "" : "s"}` })
   })
@@ -251,7 +267,7 @@ export default function WalletsPage() {
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5">
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Wallets</h1>
-        <p className="text-muted-foreground text-sm">Your dev wallet pays for everything. Buyer wallets buy your coin; fund them from the dev wallet and collect it all back when you are done.</p>
+        <p className="text-muted-foreground text-sm">Your main wallet pays for everything. Buyer wallets buy your coin; fund them from the main wallet and collect it all back when you are done.</p>
       </div>
 
       <DevWalletCard onChanged={() => void load()} />
@@ -273,7 +289,7 @@ export default function WalletsPage() {
       {/* ── buyer wallets ── */}
       <section className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="mr-1 text-[15px] font-semibold">Buyer wallets <span className="text-muted-foreground font-normal">{buyers.length}{buyers.length ? ` · ${chain.fmt(total)} ${chain.symbol}` : ""}</span></h2>
+          <h2 className="mr-1 inline-flex items-center gap-1.5 text-[15px] font-semibold">Buyer wallets <span className="text-muted-foreground font-normal">{buyers.length}{buyers.length ? ` · ${chain.fmt(total)} ${chain.symbol}` : ""}</span></h2>
           <span className="inline-flex items-center gap-1">
             <Button size="sm" onClick={createWallets} disabled={!!busy}>{busy === "create" ? "Adding…" : "+ Add"}</Button>
             <Input inputMode="numeric" value={newCount} onChange={(e) => setNewCount(e.target.value)} className="h-8 w-12 text-center font-mono" aria-label="How many wallets to add" />
@@ -296,26 +312,31 @@ export default function WalletsPage() {
           </div>
         ) : null}
 
-        {/* the actions, always here: they act on every buyer wallet, or on the ticked ones */}
+        {/* the actions, all in view: they act on every buyer wallet, or on the ticked ones */}
         {buyers.length > 0 ? (
-          <div className="bg-muted/40 flex flex-wrap items-center gap-2 rounded-xl border px-3 py-2.5 text-sm">
-            <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">{ticked.length ? `${ticked.length} ticked` : "All wallets"}</span>
-            {ticked.length ? <button type="button" className="text-muted-foreground hover:text-foreground text-xs underline underline-offset-4" onClick={() => setSelected(new Set())}>untick</button> : null}
-            <span className="bg-border mx-1 h-5 w-px" />
-            <span className="text-muted-foreground">Give each</span>
-            <Input inputMode="decimal" value={each} onChange={(e) => setEach(e.target.value)} className="h-8 w-20 font-mono" aria-label="Amount each" />
-            <span className="text-muted-foreground">{chain.symbol}</span>
-            <Button size="sm" onClick={() => void fund(targets, each)} disabled={!!busy || noMain} title={noMain ? "Create the dev wallet first" : `Send ${each} ${chain.symbol} from the dev wallet to each of the ${scope} wallets`}>{busy === "fund" ? "Sending…" : "Fund"}</Button>
-            <span className="bg-border mx-1 h-5 w-px" />
-            <Button size="sm" variant="outline" onClick={collect} disabled={!!busy || noMain} title={`Every wallet sends its whole ${chain.symbol} balance (minus the fee) back to the dev wallet`}>{busy === "collect" ? "Collecting…" : "Collect all to dev wallet"}</Button>
-            <Menu trigger={(open) => <Button size="sm" variant="ghost" disabled={!!busy}>More {open ? "▴" : "▾"}</Button>}>
-              <MenuItem onClick={() => setPanel(panel === "send" ? null : "send")} hint="any address, even outside this app">Send to an address…</MenuItem>
-              <MenuItem onClick={() => setPanel(panel === "exchange" ? null : "exchange")} disabled={noMain || venues?.exchange === "off"} hint="each wallet is paid by an exchange, not by the dev wallet">Fund through an exchange…</MenuItem>
-              {chain.features.tokenAccounts ? <MenuItem onClick={closeAccounts} disabled={noMain} hint="gets the rent back into the dev wallet">Close empty token accounts</MenuItem> : null}
-              <MenuItem onClick={exportKeys} hint="the dev wallet + these wallets, as a file">Download keys</MenuItem>
-              {DEMO ? <MenuItem onClick={exportAll}>Download every key in this browser</MenuItem> : <MenuItem onClick={rewrite} hint={folder?.dir}>Rewrite the backup files</MenuItem>}
-              <MenuItem danger onClick={() => void archive(ticked)} disabled={!ticked.length} hint={ticked.length ? "keys are kept, nothing is deleted" : "tick the wallets to remove first"}>Remove {ticked.length ? `${ticked.length} ticked` : "ticked"} from the list</MenuItem>
-            </Menu>
+          <div className="bg-muted/40 flex flex-col gap-2.5 rounded-xl border px-3 py-2.5 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">{ticked.length ? `${ticked.length} ticked` : "All wallets"}</span>
+              {ticked.length ? <button type="button" className="text-muted-foreground hover:text-foreground text-xs underline underline-offset-4" onClick={() => setSelected(new Set())}>untick</button> : null}
+              <span className="bg-border mx-1 h-5 w-px" />
+              <span className="text-muted-foreground">Give each</span>
+              <Input inputMode="decimal" value={each} onChange={(e) => setEach(e.target.value)} className="h-8 w-20 font-mono" aria-label="Amount each" />
+              <span className="text-muted-foreground">{chain.symbol}</span>
+              <Button size="sm" onClick={() => void fund(targets, each)} disabled={!!busy || noMain} title={noMain ? "Create the main wallet first" : `Send ${each} ${chain.symbol} from the main wallet to each of the ${scope} wallets`}>{busy === "fund" ? "Sending…" : "Fund"}</Button>
+              <Q k="fundAll" />
+              <span className="bg-border mx-1 h-5 w-px" />
+              <Button size="sm" variant="outline" onClick={collect} disabled={!!busy || noMain} title={`Every wallet sends its whole ${chain.symbol} balance (minus the fee) back to the main wallet`}>{busy === "collect" ? "Collecting…" : "Collect all to main wallet"}</Button>
+              <Q k="collectAll" />
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 border-t pt-2.5">
+              <Button size="xs" variant={panel === "send" ? "secondary" : "outline"} onClick={() => setPanel(panel === "send" ? null : "send")} disabled={!!busy}>Send to an address</Button>
+              <Button size="xs" variant={panel === "exchange" ? "secondary" : "outline"} onClick={() => setPanel(panel === "exchange" ? null : "exchange")} disabled={!!busy || noMain || venues?.exchange === "off"} title={venues?.exchange === "off" ? "Exchange routing is switched off on the API right now" : undefined}>Fund through an exchange</Button>
+              {chain.features.tokenAccounts ? <Button size="xs" variant="outline" onClick={closeAccounts} disabled={!!busy || noMain}>{busy === "close" ? "Closing…" : "Close empty token accounts"}</Button> : null}
+              <Button size="xs" variant="outline" onClick={exportKeys} disabled={!!busy}>{busy === "export" ? "Reading…" : "Download keys"}</Button>
+              {DEMO ? <Button size="xs" variant="outline" onClick={exportAll} disabled={!!busy}>Download every key</Button> : <Button size="xs" variant="outline" onClick={rewrite} disabled={!!busy}>Rewrite backup files</Button>}
+              <Button size="xs" variant="outline" className="text-destructive" onClick={() => void archive(ticked)} disabled={!!busy || !ticked.length} title={ticked.length ? "Keys are kept, nothing is deleted; find them under Archived wallets" : "Tick the wallets to archive first"}>{busy === "archive" ? "Archiving…" : `Archive${ticked.length ? ` ${ticked.length} ticked` : " ticked"}`}</Button>
+              <Q k="more" />
+            </div>
           </div>
         ) : null}
 
@@ -324,7 +345,7 @@ export default function WalletsPage() {
             <span className="text-muted-foreground">Send from {scope} wallets to</span>
             <Select value={(folder?.wallets ?? []).some((w) => w.publicKey === sendTo) ? sendTo : ""} onChange={(e) => setSendTo(e.target.value)} className="h-8 w-56 text-xs" aria-label="Destination wallet">
               <option value="">one of my wallets…</option>
-              {(folder?.wallets ?? []).map((w) => <option key={w.publicKey} value={w.publicKey}>{w.publicKey === main ? "Dev wallet" : w.label} · {chain.short(w.publicKey)}</option>)}
+              {(folder?.wallets ?? []).map((w) => <option key={w.publicKey} value={w.publicKey}>{w.publicKey === main ? "Main wallet" : w.label} · {chain.short(w.publicKey)}</option>)}
             </Select>
             <span className="text-muted-foreground">or</span>
             <Input value={sendTo} onChange={(e) => setSendTo(e.target.value.trim())} placeholder="paste any address" className="h-8 w-72 font-mono text-xs" aria-label="Destination address" />
@@ -353,13 +374,15 @@ export default function WalletsPage() {
         <Table>
           <THead>
             <TR>
-              <TH className="w-8"><Checkbox checked={shown.length > 0 && shown.every((w) => selected.has(w.publicKey))} onChange={(e) => setSelected(e.target.checked ? new Set([...selected, ...shown.map((w) => w.publicKey)]) : new Set([...selected].filter((pk) => !shown.some((w) => w.publicKey === pk))))} aria-label="Tick all" title="Tick rows only to act on some of them" /></TH>
+              <TH className="w-8"><Checkbox checked={shown.length > 0 && shown.every((w) => selected.has(w.publicKey))} onChange={(e) => setSelected(e.target.checked ? new Set([...selected, ...shown.map((w) => w.publicKey)]) : new Set([...selected].filter((pk) => !shown.some((w) => w.publicKey === pk))))} aria-label="Tick all" /></TH>
               <TH>Name</TH>
               <TH>Address</TH>
               <TH className="text-right">{chain.symbol}</TH>
               {coin ? <TH className="text-right">{coin.symbol ?? "Tokens"}</TH> : null}
               <TH className="w-px">
-                {buyers.length > 8 ? <Input placeholder="search…" value={search} onChange={(e) => setSearch(e.target.value)} className="h-7 w-36 text-xs font-normal normal-case" /> : null}
+                <span className="inline-flex items-center gap-2">
+                  {buyers.length > 8 ? <Input placeholder="search…" value={search} onChange={(e) => setSearch(e.target.value)} className="h-7 w-36 text-xs font-normal normal-case" /> : null}
+                </span>
               </TH>
             </TR>
           </THead>
@@ -378,19 +401,19 @@ export default function WalletsPage() {
                       <span className="inline-flex items-center gap-1">
                         <Mono>{chain.short(w.publicKey)}</Mono>
                         <Button variant="ghost" size="icon-xs" aria-label="Copy address" title="Copy address" onClick={() => { void copyText(w.publicKey); toast({ tone: "muted", title: "Address copied" }) }}><Copy /></Button>
-                        <a className="text-muted-foreground hover:text-foreground" href={chain.explorerAddress(w.publicKey)} target="_blank" rel="noreferrer" aria-label="Open in explorer"><ExternalLink className="size-3" /></a>
+                        <a className="inline-flex opacity-70 transition-opacity hover:opacity-100" href={chain.explorerAddress(w.publicKey)} target="_blank" rel="noreferrer" aria-label={`Open on ${chain.explorer.name}`} title={`Open on ${chain.explorer.name}`}><BrandIcon src={chain.explorer.logo} label={chain.explorer.name} size={13} /></a>
                       </span>
                     </TD>
                     <TD className="text-right font-mono text-xs">{chain.fmt(b?.native)}</TD>
                     {coin ? <TD className="text-right font-mono text-xs">{b?.tokens === undefined ? "–" : b.tokens.toLocaleString("en-US", { maximumFractionDigits: 2 })}</TD> : null}
                     <TD>
                       <span className="inline-flex items-center gap-1">
-                        <Button size="xs" variant="outline" onClick={() => { setEditing(null); setShownKey(null); setFunding(funding?.publicKey === w.publicKey ? null : { publicKey: w.publicKey, amount: each }) }} disabled={!!busy || noMain} title={`Send ${chain.symbol} from the dev wallet to this one`}>Fund</Button>
+                        <Button size="xs" variant="outline" onClick={() => { setEditing(null); setShownKey(null); setFunding(funding?.publicKey === w.publicKey ? null : { publicKey: w.publicKey, amount: each }) }} disabled={!!busy || noMain} title={`Send ${chain.symbol} from the main wallet to this one`}>Fund</Button>
                         <Button size="xs" variant="outline" onClick={() => { setEditing(null); setFunding(null); void showKey(w.publicKey) }} disabled={!!busy}>Key</Button>
                         <Menu trigger={() => <Button size="icon-xs" variant="ghost" aria-label="More for this wallet"><Ellipsis /></Button>}>
-                          <MenuItem onClick={() => void makeDev(w.publicKey)} hint="it will create coins and pay for buys">Make this the dev wallet</MenuItem>
+                          <MenuItem onClick={() => void makeDev(w.publicKey)} hint="it will create coins and pay for buys">Make this the main wallet</MenuItem>
                           <MenuItem onClick={() => { setFunding(null); setShownKey(null); setEditing({ publicKey: w.publicKey, label: w.label }) }}>Rename</MenuItem>
-                          <MenuItem danger onClick={() => void archive([w.publicKey])} hint="the key is kept">Remove from the list</MenuItem>
+                          <MenuItem danger onClick={() => void archive([w.publicKey])} hint="the key is kept; restore it under Archived wallets">Archive</MenuItem>
                         </Menu>
                       </span>
                     </TD>
@@ -409,7 +432,7 @@ export default function WalletsPage() {
                           <form className="flex flex-wrap items-center gap-2 text-sm" onSubmit={(e) => { e.preventDefault(); void fund([w.publicKey], funding.amount) }}>
                             <span className="text-muted-foreground">Send</span>
                             <Input autoFocus inputMode="decimal" value={funding.amount} onChange={(e) => setFunding({ ...funding, amount: e.target.value })} className="h-8 w-28 font-mono" aria-label="Amount" />
-                            <span className="text-muted-foreground">{chain.symbol} from the dev wallet to {w.label}</span>
+                            <span className="text-muted-foreground">{chain.symbol} from the main wallet to {w.label}</span>
                             <Button size="sm" type="submit" disabled={!!busy || noMain}>{busy === "fund" ? "Sending…" : "Send"}</Button>
                             <Button size="sm" variant="ghost" type="button" onClick={() => setFunding(null)}>Cancel</Button>
                           </form>
@@ -431,6 +454,57 @@ export default function WalletsPage() {
         </Table>
         {ticked.length === 0 && buyers.length > 1 ? <p className="text-muted-foreground -mt-1 text-xs">Tip: tick some rows to fund, collect or send from only those.</p> : null}
       </section>
+
+      {/* archived wallets */}
+      {archived && archived.length > 0 ? (
+        <section className="flex flex-col gap-2">
+          <button type="button" className="flex items-center gap-2 self-start text-left" onClick={() => setArchivedOpen((v) => !v)} aria-expanded={archivedOpen}>
+            <h2 className="text-[15px] font-semibold">Archived wallets <span className="text-muted-foreground font-normal">{archived.length}{archived.some((a) => (a.native ?? 0) > 0) ? ` · ${chain.fmt(archived.reduce((s, a) => s + (a.native ?? 0), 0))} ${chain.symbol} inside` : ""}</span></h2>
+            <span className="text-muted-foreground text-sm">{archivedOpen ? "▴" : "▾"}</span>
+          </button>
+          {archivedOpen ? (
+            <>
+              <p className="text-muted-foreground text-xs">Wallets you archived: out of the list and never used, keys kept. Restore one to fund, trade or collect from it again.</p>
+              <Table>
+                <THead><TR><TH>Name</TH><TH>Address</TH><TH className="text-right">{chain.symbol}</TH><TH className="w-px" /></TR></THead>
+                <TBody>
+                  {archived.map((a) => (
+                    <React.Fragment key={a.publicKey}>
+                      <TR>
+                        <TD>{a.label}</TD>
+                        <TD>
+                          <span className="inline-flex items-center gap-1">
+                            <Mono>{chain.short(a.publicKey)}</Mono>
+                            <Button variant="ghost" size="icon-xs" aria-label="Copy address" onClick={() => { void copyText(a.publicKey); toast({ tone: "muted", title: "Address copied" }) }}><Copy /></Button>
+                            <a className="inline-flex opacity-70 transition-opacity hover:opacity-100" href={chain.explorerAddress(a.publicKey)} target="_blank" rel="noreferrer" aria-label={`Open on ${chain.explorer.name}`} title={`Open on ${chain.explorer.name}`}><BrandIcon src={chain.explorer.logo} label={chain.explorer.name} size={13} /></a>
+                          </span>
+                        </TD>
+                        <TD className={`text-right font-mono text-xs ${(a.native ?? 0) > 0 ? "text-foreground" : "text-muted-foreground"}`}>{a.native === null ? "–" : chain.fmt(a.native)}</TD>
+                        <TD>
+                          <span className="inline-flex gap-1">
+                            <Button size="xs" variant="outline" onClick={() => void restore([a.publicKey])} disabled={!!busy}>{busy === `restore:${a.publicKey}` ? "Restoring…" : "Restore"}</Button>
+                            <Button size="xs" variant="outline" onClick={() => void showKey(a.publicKey)} disabled={!!busy}>Key</Button>
+                          </span>
+                        </TD>
+                      </TR>
+                      {shownKey?.publicKey === a.publicKey ? (
+                        <TR className="bg-muted/30"><TD colSpan={4} className="py-2">
+                          <div className="flex flex-wrap items-center gap-2 text-sm">
+                            <Mono className="bg-background rounded border px-2 py-1 text-xs break-all select-all">{shownKey.privateKey}</Mono>
+                            <Button size="xs" variant="outline" onClick={() => { void copyText(shownKey.privateKey); toast({ tone: "muted", title: "Key copied" }) }}><Copy />Copy</Button>
+                            <Button size="xs" variant="ghost" onClick={() => setShownKey(null)}>Hide</Button>
+                          </div>
+                        </TD></TR>
+                      ) : null}
+                    </React.Fragment>
+                  ))}
+                </TBody>
+              </Table>
+              {archived.length > 1 ? <Button size="xs" variant="outline" className="self-start" onClick={() => void restore(archived.map((a) => a.publicKey))} disabled={!!busy}>Restore all {archived.length}</Button> : null}
+            </>
+          ) : null}
+        </section>
+      ) : null}
 
       {/* exchange orders */}
       {legs.length > 0 ? (

@@ -1,10 +1,8 @@
 /**
- * Settings: `_app/pons-starter/settings.json` in the wallet folder (written by the Settings sheet) over `.env` defaults.
+ * Settings: `_app/<app>-starter/settings.json` in the wallet folder (written by the Settings sheet) over `.env` defaults.
  *   apiKey      TRENCHY_API_KEY
  *   apiUrl      TRENCHY_API_URL      default https://api.trenchy.tools
- *   slippage    (percent)            default 10
- *   sniperGapMs                      default 400 (gap between sniper buys after the create confirms)
- *   holderWindowS / holderDelayS     default 120 / 5 (holder buys spread over the window, after the delay)
+ *   slippage    (percent)            default 10 (the launch form carries its own sniper gap and later-buyer window)
  *   mainWallet                       the ★ wallet (0x address): pays for everything, receives gathers, default creator
  */
 import { DEFAULT_API_URL, DEFAULTS } from "./core/env"
@@ -13,8 +11,8 @@ import { Trenchy } from "./trenchy"
 
 export { DEFAULT_API_URL }
 
-export type Settings = { apiKey?: string; apiUrl?: string; slippage?: number; sniperGapMs?: number; holderWindowS?: number; holderDelayS?: number; mainWallet?: string }
-const NUMS = ["slippage", "sniperGapMs", "holderWindowS", "holderDelayS"] as const
+export type Settings = { apiKey?: string; apiUrl?: string; slippage?: number; mainWallet?: string }
+const NUMS = ["slippage"] as const
 
 export function readSettings(): Settings {
   const raw = readJson<Settings>(SETTINGS_FILE, {})
@@ -44,7 +42,7 @@ export function updateSettings(patch: { [K in keyof Settings]?: Settings[K] | nu
   return next
 }
 
-export type Effective = { apiUrl: string; apiKey: string; slippage: number; sniperGapMs: number; holderWindowS: number; holderDelayS: number; apiKeyFrom: "settings" | "env" | "none" }
+export type Effective = { apiUrl: string; apiKey: string; slippage: number; apiKeyFrom: "settings" | "env" | "none" }
 
 /** What the app actually uses: settings.json over .env over the built-in default. */
 export function effectiveSettings(): Effective {
@@ -54,9 +52,6 @@ export function effectiveSettings(): Effective {
     apiUrl: (s.apiUrl || process.env.TRENCHY_API_URL || DEFAULT_API_URL).trim().replace(/\/+$/, ""),
     apiKey: s.apiKey || envKey,
     slippage: s.slippage ?? DEFAULTS.slippage,
-    sniperGapMs: s.sniperGapMs ?? DEFAULTS.sniperGapMs,
-    holderWindowS: s.holderWindowS ?? DEFAULTS.holderWindowS,
-    holderDelayS: s.holderDelayS ?? DEFAULTS.holderDelayS,
     apiKeyFrom: s.apiKey ? "settings" : envKey ? "env" : "none",
   }
 }

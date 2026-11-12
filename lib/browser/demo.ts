@@ -1,5 +1,7 @@
 "use client"
 
+import { chain } from "../chain"
+import { SUITE, suiteItem } from "../suite"
 /**
  * Demo mode: the mode flag, this app's constants, and THE SEAM between the pages and whatever answers them.
  *
@@ -22,13 +24,14 @@
 /** Built with NEXT_PUBLIC_DEMO=1: the hosted demo. Inlined at build time, so the unused branch is dropped. */
 export const DEMO = process.env.NEXT_PUBLIC_DEMO === "1"
 /** Where visitors clone the app to run it on their own machine. */
-export const REPO_URL = "https://github.com/Trenchy-Tools/trenchytools-pons-launcher"
+export const REPO_URL = suiteItem(chain.suiteId)?.repo ?? SUITE.github
 /** The API the demo talks to, straight from the browser (the CSP in next.config.ts allows exactly this host). */
-export const DEMO_API_URL = "https://api.trenchy.tools"
-/** The label of the per-visitor key: GET /api/create-api-key?label=demo-pons */
-export const DEMO_KEY_LABEL = "demo-pons"
+/** The API this demo calls: api.trenchy.tools, or NEXT_PUBLIC_TRENCHY_API_URL in development (a local apps/api with endpoints not deployed yet). */
+export const DEMO_API_URL = (process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_TRENCHY_API_URL) || "https://api.trenchy.tools"
+/** The label of the per-visitor key: GET /api/create-api-key?label=demo-<suiteId> (demo-pons, demo-bnb, …) */
+export const DEMO_KEY_LABEL = `demo-${chain.suiteId}`
 /** localStorage namespace: every key this app writes starts with it. */
-export const STORE_PREFIX = "trenchytools.pons-starter"
+export const STORE_PREFIX = `trenchytools.${chain.suiteId}-starter`
 /** What the status strip says instead of the folder path. */
 export const KEYS_HOME = "this browser"
 

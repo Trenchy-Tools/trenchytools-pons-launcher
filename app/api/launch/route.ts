@@ -1,23 +1,20 @@
 import { body, fail, ok } from "@/lib/http"
-import { normalizeForm, readLaunches, startLaunch, type LaunchForm } from "@/lib/launch"
+import { readLaunches, startLaunch } from "@/lib/launch"
+import { readForm } from "./form"
 
 export const dynamic = "force-dynamic"
 
-/** GET /api/launch → { launches }: the records in _app/pons-starter/launches.json, newest first. */
+/** GET /api/launch → launch records (newest first) from _app/<app>-starter/launches.json. */
 export async function GET() {
   return ok({ launches: readLaunches() })
 }
 
-/**
- * POST /api/launch (the form) → { id }. Starts the run (lib/launch.ts): trade-local create → sign → send → wait for
- * success → bundle buys at once → snipers staggered → holders over the window. Follow it at GET /api/launch/:id/log.
- * The run refuses (nothing sent) when a wallet file is missing or any wallet is short of ETH.
- */
+/** POST /api/launch (LaunchForm) → { id, events: "/api/launch/:id/events" }: starts the launch in the background. */
 export async function POST(req: Request) {
   try {
-    const form = normalizeForm(await body<LaunchForm>(req))
-    return ok({ id: startLaunch(form) })
+    const rec = startLaunch(readForm(await body(req)))
+    return ok({ id: rec.id, events: `/api/launch/${rec.id}/events`, launch: rec })
   } catch (e) {
-    return fail(e)
+    return fail(e, 400)
   }
 }

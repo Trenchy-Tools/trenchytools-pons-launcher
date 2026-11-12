@@ -5,6 +5,7 @@ import { cn } from "@/lib/cn"
 export function Pill({ tone = "muted", className, children, ...props }: React.ComponentProps<"span"> & { tone?: "muted" | "ok" | "warn" | "error" }) {
   return (
     <span
+      data-pill=""
       className={cn(
         "inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium whitespace-nowrap",
         tone === "ok" && "border-ok/40 text-ok",

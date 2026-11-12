@@ -14,6 +14,7 @@
 import type { PrivateKeyAccount } from "viem/accounts"
 import { sendAll, waitSuccess, type AccountData, type SendOptions, type UnsignedTx } from "./core/evm"
 import { ApiError } from "./core/errors"
+import { chain } from "./chain"
 
 export { ApiError }
 
@@ -24,7 +25,7 @@ export type TxLabel = "approve" | "buy" | "sell" | "create" | "graduate" | "fee"
 export type EvmTx = { chainId: number; from: string; to: string; data: string; value: string; valueEth?: string; gas?: string; label: TxLabel }
 export type Expected = { tokens: number; eth: number }
 export type TokenMetadata = { name: string; symbol: string; image: string; description?: string; twitter?: string; telegram?: string; website?: string }
-/** The body of POST /api/rh/trade-local. */
+/** The body of POST /api/<chain>/trade-local. */
 export type TradeBody = {
   wallet: string
   /** collectCreatorFee: `[sweep?] claim` for the creator wallet (token = sweep that curve's pending fees first) */
@@ -35,15 +36,24 @@ export type TradeBody = {
   denominatedInEth?: "true" | "false"
   slippage?: number
   tokenMetadata?: TokenMetadata
-  /** create: up to 31 wallets that skip the launch-window snipe tax */
+  /** create: up to 31 wallets that skip the launch-window snipe tax (pons) */
   exemptWallets?: string[]
+  /** the launchpad of a create (lib/chain.ts evm.createVenue when absent); trades detect it */
+  venue?: string
 }
 export type Built = { chainId: number; transactions: EvmTx[]; expected: Expected; venue: "curve" | "v4"; predicted?: { token: string; curve: string }; launchFeeEth?: number }
 export type TxStatus = { hash: string; status: "success" | "reverted" | "pending_or_unknown"; block?: number; gasUsed?: string }
+/** One wallet's ETH and, when asked with a coin, its balance of that coin (GET /api/<chain>/balances?wallets=…&token=…). */
+export type WalletBalance = { wallet: string; eth: number; tokens: number; raw: string }
+/** GET /api/<chain>/pnl: what every wallet put into the coin and got back, in ETH (gas and the API fee in it). */
+export type CoinPnl = { token: string; spent: number; received: number; net: number; trades: number; truncated: boolean; wallets: Array<{ wallet: string; spent: number; received: number; net: number; buys: number; sells: number; gasEth: number }> }
+/** POST /api/ai/coin: a name, ticker, description and logo made from an idea (rate limited per key). */
+export type AiCoin = { name: string; symbol: string; description: string; image: string; via?: { writer?: string; drawer?: string }; left?: { hour?: number; day?: number } }
 export type Simulation = { ok: boolean; steps: Array<{ label: string; ok: boolean; gasUsed: string | null; error: string | null }> }
 export type Quote = { venue: string; action: "buy" | "sell"; ethIn?: number; tokensOut?: number; tokensIn?: number; ethOut?: number; snipeTaxBps?: number; bondingProgressPct?: number; [k: string]: unknown }
-export type TokenInfo = { token: string; name: string; symbol: string; venue: "pons-curve" | "uniswap-v4"; curve: string; graduated: boolean; creator: string; curveState: Record<string, number> | null }
-/** GET /api/rh/creator-fees: the escrow balance (claimable now, every coin of the creator) and, with a token, that curve's pending fees. */
+/** GET /api/<chain>/token/:token, the fields every chain answers (+ priceNative / totalSupply where the chain gives them). */
+export type TokenInfo = { token: string; name: string; symbol: string; venue: string; curve: string; graduated: boolean; creator: string; curveState: Record<string, number> | null; priceNative?: number | null; totalSupply?: number | null }
+/** GET /api/<chain>/creator-fees: the escrow balance (claimable now, every coin of the creator) and, with a token, that curve's pending fees. */
 export type CreatorFees = { wallet: string; escrow: string; claimableWei: string; claimableEth: number; eth: number; curve: { token: string; curve: string; creator: string; graduated: boolean; pendingEth: number; sweepable: boolean; reason?: string } | null }
 
 export type TransferMode = "float" | "fixed" | "private"
@@ -77,9 +87,9 @@ export class Trenchy {
     return !!this.key
   }
 
-  /** The websocket for live data (one connection, many subscriptions): wss://…/api/rh/data?api-key=… */
+  /** The websocket for live data (one connection, many subscriptions): wss://…/api/<chain>/data?api-key=… */
   wsUrl(): string {
-    return `${this.url.replace(/^http/, "ws")}/api/rh/data?api-key=${encodeURIComponent(this.key)}`
+    return `${this.url.replace(/^http/, "ws")}${this.base}/data?api-key=${encodeURIComponent(this.key)}`
   }
 
   /** The dry run's trace: while on, every call is recorded (method, path, status, ms, what came back). */
@@ -99,13 +109,13 @@ export class Trenchy {
     }
   }
   private async callRaw<T>(path: string, init: RequestInit = {}): Promise<T> {
-    if (!this.key) throw new ApiError(`No TrenchyTools API key. Create one at ${this.url}/api/create-api-key?label=pons-starter and paste it in Settings.`, 401, "no_key")
+    if (!this.key) throw new ApiError(`No TrenchyTools API key. Create one at ${this.url}/api/create-api-key?label=${chain.suiteId}-starter and paste it in Settings.`, 401, "no_key")
     const headers = new Headers(init.headers)
     headers.set("x-api-key", this.key)
     for (let attempt = 0; ; attempt++) {
       let res: Response
       try {
-        res = await fetch(`${this.url}${path}`, { ...init, headers, signal: AbortSignal.timeout(45_000) })
+        res = await fetch(`${this.url}${path}`, { ...init, headers, signal: AbortSignal.timeout((init as { timeoutMs?: number }).timeoutMs ?? 45_000) })
       } catch (e) {
         if (attempt < 2) { await sleep(500 * (attempt + 1)); continue }
         throw new ApiError(`TrenchyTools API unreachable at ${this.url} (${e instanceof Error ? e.message : e})`, 0, "unreachable")
@@ -129,60 +139,150 @@ export class Trenchy {
   /** GET /api/me: the key's prefix and 30-day usage. The "Connected" check. */
   me() { return this.get<{ keyPrefix?: string; usage30d?: unknown[] }>("/api/me") }
 
-  // ── Robinhood chain: /api/rh ─────────────────────────────────────────────
+  // ── the chain: /api/<chain> (lib/chain.ts evm.api: /api/rh, /api/bnb, /api/elysium, /api/base) ──────────
+  /** the chain's API prefix */
+  private get base(): string { return chain.evm!.api }
 
-  rh = {
-    /** GET /api/rh/account?wallet=0x…: chainId, pendingNonce, maxFeePerGas, maxPriorityFeePerGas, balanceEth. Read it once per wallet per batch. */
-    account: (wallet: string) => this.get<AccountData>(`/api/rh/account?wallet=${wallet}`),
 
-    /** POST /api/rh/trade-local: the ordered unsigned transactions for a buy, sell or create ([approve?] trade [fee]; create → + predicted.token). */
-    tradeLocal: (b: TradeBody) => this.post<Built>("/api/rh/trade-local", b),
+  evm = {
+    /** GET /api/<chain>/account?wallet=0x…: chainId, pendingNonce, maxFeePerGas, maxPriorityFeePerGas, balanceEth. Read it once per wallet per batch. */
+    account: async (wallet: string): Promise<AccountData> => {
+      const a = await this.get<AccountData & Record<string, string | number>>(`${this.base}/account?wallet=${wallet}`)
+      // every chain under one shape: the balance under its own name, and gas as EIP-1559 fields (a gasPrice-only chain: both = gasPrice)
+      return { ...a, balanceEth: String(a.balanceEth ?? a.balanceBnb ?? a.balanceHype ?? a.balance ?? "0"), maxFeePerGas: String(a.maxFeePerGas ?? a.gasPrice), maxPriorityFeePerGas: String(a.maxPriorityFeePerGas ?? (a.maxFeePerGas ? "0" : a.gasPrice)), transferGas: String(a.transferGas ?? "21000") }
+    },
 
-    /** POST /api/rh/simulate { transactions }: run trade-local transactions in order on a copy of the chain. Nothing is sent. */
-    simulate: (transactions: EvmTx[]) => this.post<Simulation>("/api/rh/simulate", { transactions }),
+    /** POST /api/<chain>/trade-local: the ordered unsigned transactions for a buy, sell or create ([approve?] trade [fee]; create → + predicted.token). */
+    tradeLocal: async (b: TradeBody): Promise<Built> => {
+      // a create goes to the chain's launchpad (lib/chain.ts evm.createVenue) unless the body names one
+      const body = b.action === "create" && !b.venue && chain.evm?.createVenue ? { ...b, venue: chain.evm.createVenue } : b
+      const r = await this.post<Built & { token?: string; expected: Record<string, number> }>(`${this.base}/trade-local`, body)
+      const e = r.expected ?? {}
+      return { ...r, predicted: r.predicted ?? (r.token ? { token: r.token, curve: "" } : undefined), expected: { ...e, tokens: e.tokens ?? e.tokensOut ?? e.tokensIn ?? 0, eth: e.eth ?? e.bnb ?? e.hypeIn ?? e.hypeOut ?? e.devBuyHype ?? 0 } }
+    },
 
-    /** POST /api/rh/send { transaction: "0x…signed" } → { hash }. */
-    send: (transaction: string) => this.post<{ hash: string }>("/api/rh/send", { transaction }),
+    /** POST /api/<chain>/simulate { transactions }: run trade-local transactions in order on a copy of the chain. Nothing is sent. */
+    simulate: (transactions: EvmTx[]) => this.post<Simulation>(`${this.base}/simulate`, { transactions }),
 
-    /** GET /api/rh/tx/:hash → { status: "success" | "reverted" | "pending_or_unknown" }. */
-    tx: (hash: string) => this.get<TxStatus>(`/api/rh/tx/${hash}`),
+    /** POST /api/<chain>/send { transaction: "0x…signed" } → { hash }. */
+    send: (transaction: string) => this.post<{ hash: string }>(`${this.base}/send`, { transaction }),
 
-    /** GET /api/rh/quote?token&action&amount[&wallet]: the exact numbers before a trade (snipe tax depends on the wallet). */
-    quote: (p: { token: string; action: "buy" | "sell"; amount: number; wallet?: string }) =>
-      this.get<Quote>(`/api/rh/quote?token=${p.token}&action=${p.action}&amount=${p.amount}${p.wallet ? `&wallet=${p.wallet}` : ""}`),
+    /**
+     * The status of one transaction. Calls made within ~150 ms of each other are asked together in ONE request
+     * (GET /api/<chain>/txs, up to 100 hashes), so a launch or a sell-all waiting on 20 transactions costs one request a
+     * poll, not 20. An API without /txs gets GET /api/<chain>/tx/:hash one by one instead.
+     */
+    tx: (hash: string) => this.txStatus(hash),
 
-    /** GET /api/rh/token/:token: name, symbol, venue (pons-curve | uniswap-v4), curve state. */
-    token: (token: string) => this.get<TokenInfo>(`/api/rh/token/${token}`),
+    /** GET /api/<chain>/pnl?token=&wallets=&since=: the ETH profit or loss of up to 100 wallets on the coin. */
+    pnl: (token: string, wallets: string[], since?: number) => this.get<CoinPnl>(`${this.base}/pnl?token=${token}&wallets=${wallets.join(",")}${since ? `&since=${since}` : ""}`),
 
-    /** GET /api/rh/trades?token=&limit=: the coin's past trades, newest first, in the websocket's payload shape (the tape's history). */
-    tradeHistory: (token: string, limit = 100) => this.get<{ token: string; curve: string; launchBlock: number; trades: Array<Record<string, unknown>> }>(`/api/rh/trades?token=${token}&limit=${limit}`),
-
-    /** GET /api/rh/creator-fees?wallet=&token=: what the creator can claim (escrow) and what the coin's curve still holds. */
-    creatorFees: (wallet: string, token?: string) => this.get<CreatorFees>(`/api/rh/creator-fees?wallet=${wallet}${token ? `&token=${token}` : ""}`),
-
-    /** GET /api/rh/balances?wallets=a,b,…: ETH for up to 100 wallets per call. */
-    ethBalances: async (wallets: string[]): Promise<Map<string, number>> => {
-      const out = new Map<string, number>()
+    /**
+     * ETH of many wallets and, with `token`, their balance of that coin: GET /api/<chain>/balances?wallets=…&token=… (100 per
+     * call). An API that answers without the coin's balances is asked per wallet instead.
+     */
+    walletBalances: async (wallets: string[], token?: string | null): Promise<WalletBalance[]> => {
+      const out: WalletBalance[] = []
       for (let i = 0; i < wallets.length; i += 100) {
-        const r = await this.get<{ wallets: Array<{ wallet: string; eth: string }> }>(`/api/rh/balances?wallets=${wallets.slice(i, i + 100).join(",")}`)
-        for (const w of r.wallets) out.set(w.wallet.toLowerCase(), Number(w.eth))
+        const chunk = wallets.slice(i, i + 100)
+        const r = await this.get<{ wallets: Array<{ wallet: string; eth?: string; native?: string; bnb?: string; hype?: string; token?: { balance: string; raw: string } }> }>(`${this.base}/balances?wallets=${chunk.join(",")}${token ? `&token=${token}` : ""}`)
+        for (const w of r.wallets) out.push({ wallet: w.wallet, eth: Number(w.eth ?? w.native ?? w.bnb ?? w.hype ?? 0), tokens: Number(w.token?.balance ?? 0), raw: w.token?.raw ?? "0" })
+        if (token && r.wallets.length && !r.wallets[0].token) {
+          // an older API: one call per wallet for the coin
+          await Promise.all(chunk.map(async (pk, k) => {
+            const b = await this.evm.balances(pk, [token]).catch(() => null)
+            const row = out[out.length - chunk.length + k]
+            row.tokens = Number(b?.tokens?.[0]?.balance ?? 0)
+            row.raw = row.tokens > 0 ? "1" : "0"
+          }))
+        }
       }
       return out
     },
 
-    /** GET /api/rh/balances?wallet=&tokens=: ETH + token balances of one wallet. */
+    /** GET /api/<chain>/quote?token&action&amount[&wallet]: the exact numbers before a trade (snipe tax depends on the wallet). */
+    quote: (p: { token: string; action: "buy" | "sell"; amount: number; wallet?: string }) =>
+      this.get<Quote>(`${this.base}/quote?token=${p.token}&action=${p.action}&amount=${p.amount}${p.wallet ? `&wallet=${p.wallet}` : ""}`).then((q) => ({ ...q, ethOut: (q.ethOut ?? q.bnbOut ?? q.hypeOut) as number | undefined, ethIn: (q.ethIn ?? q.bnbIn ?? q.hypeIn) as number | undefined })),
+
+    /** GET /api/<chain>/token/:token: name, symbol, venue (pons-curve | uniswap-v4), curve state. */
+    token: async (token: string): Promise<TokenInfo> => {
+      const t = await this.get<TokenInfo & Record<string, unknown>>(`${this.base}/token/${token}`)
+      const cs = (t.curveState ?? {}) as Record<string, number>
+      const price = typeof cs.priceEth === "number" ? cs.priceEth : typeof t.priceBnb === "number" ? t.priceBnb : typeof t.priceEth === "number" ? t.priceEth : null
+      return { ...t, venue: (t.venue ?? t.launchpad) as TokenInfo["venue"], graduated: t.graduated === true, creator: String(t.creator ?? t.founder ?? ""), curve: String(t.curve ?? ""), priceNative: price, totalSupply: typeof t.totalSupply === "number" ? t.totalSupply : null }
+    },
+
+    /** GET /api/<chain>/trades?token=&limit=: the coin's past trades, newest first, in the websocket's payload shape (the tape's history). */
+    tradeHistory: (token: string, limit = 100, fromBlock?: number) => this.get<{ token: string; head?: number; trades: Array<Record<string, unknown>> }>(`${this.base}/trades?token=${token}&limit=${limit}${fromBlock ? `&fromBlock=${fromBlock}` : ""}`),
+
+    /** GET /api/<chain>/creator-fees?wallet=&token=: what the creator can claim (escrow) and what the coin's curve still holds. */
+    creatorFees: async (wallet: string, token?: string): Promise<CreatorFees> => {
+      const f = await this.get<CreatorFees & Record<string, unknown>>(`${this.base}/creator-fees?wallet=${wallet}${token ? `&token=${token}` : ""}`)
+      // pons: escrow eth + the curve's pending · Elysium pads: claimableHype (+ pendingHype) · Flap: the processor's pendingBnb
+      const n = (v: unknown) => (typeof v === "number" ? v : 0)
+      const eth = n(f.eth ?? f.claimableHype ?? f.pendingBnb)
+      return { ...f, eth, claimableEth: n(f.claimableEth ?? f.claimableHype ?? f.pendingBnb), curve: f.curve ?? (f.pendingHype ? { token: token ?? "", curve: "", creator: wallet, graduated: false, pendingEth: n(f.pendingHype), sweepable: false } : null) }
+    },
+
+    /** GET /api/<chain>/balances?wallets=a,b,…: ETH for up to 100 wallets per call. */
+    ethBalances: async (wallets: string[]): Promise<Map<string, number>> => {
+      const out = new Map<string, number>()
+      for (let i = 0; i < wallets.length; i += 100) {
+        const r = await this.get<{ wallets: Array<{ wallet: string; eth?: string; native?: string; bnb?: string; hype?: string }> }>(`${this.base}/balances?wallets=${wallets.slice(i, i + 100).join(",")}`)
+        for (const w of r.wallets) out.set(w.wallet.toLowerCase(), Number(w.eth ?? w.native ?? w.bnb ?? w.hype ?? 0))
+      }
+      return out
+    },
+
+    /** GET /api/<chain>/balances?wallet=&tokens=: ETH + token balances of one wallet. */
     balances: (wallet: string, tokens: string[]) =>
-      this.get<{ wallet: string; eth: string; tokens: Array<{ token: string; balance: string }> }>(`/api/rh/balances?wallet=${wallet}${tokens.length ? `&tokens=${tokens.join(",")}` : ""}`),
+      this.get<{ wallet: string; eth?: string; bnb?: string; hype?: string; tokens: Array<{ token: string; balance: string }> }>(`${this.base}/balances?wallet=${wallet}${tokens.length ? `&tokens=${tokens.join(",")}` : ""}`).then((r) => ({ ...r, eth: r.eth ?? r.bnb ?? r.hype ?? "0" })),
   }
 
-  /** Poll GET /api/rh/tx/:hash until success (true), reverted (throws) or timed out (false). (lib/core/evm.ts waitSuccess) */
+  private txStatus(hash: string): Promise<TxStatus> {
+    return new Promise((resolve, reject) => {
+      const list = this.statusWaiters.get(hash) ?? []
+      list.push({ resolve, reject })
+      this.statusWaiters.set(hash, list)
+      if (!this.statusTimer) this.statusTimer = setTimeout(() => void this.flushStatuses(), 150)
+    })
+  }
+  private statusWaiters = new Map<string, Array<{ resolve: (s: TxStatus) => void; reject: (e: unknown) => void }>>()
+  private statusTimer: ReturnType<typeof setTimeout> | null = null
+  private batchStatuses = true
+  private async flushStatuses() {
+    this.statusTimer = null
+    const waiting = new Map(this.statusWaiters)
+    this.statusWaiters.clear()
+    const hashes = [...waiting.keys()]
+    const settle = (h: string, f: (w: { resolve: (s: TxStatus) => void; reject: (e: unknown) => void }) => void) => (waiting.get(h) ?? []).forEach(f)
+    for (let i = 0; i < hashes.length; i += 100) {
+      const chunk = hashes.slice(i, i + 100)
+      if (this.batchStatuses) {
+        try {
+          const r = await this.get<{ statuses: TxStatus[] }>(`${this.base}/txs?hashes=${chunk.join(",")}`)
+          const by = new Map(r.statuses.map((x) => [x.hash.toLowerCase(), x]))
+          for (const h of chunk) settle(h, (w) => w.resolve(by.get(h.toLowerCase()) ?? { hash: h, status: "pending_or_unknown" }))
+          continue
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 404)) { for (const h of chunk) settle(h, (w) => w.reject(e)); continue }
+          this.batchStatuses = false // an older API: one by one from now on
+        }
+      }
+      await Promise.all(chunk.map(async (h) => {
+        try { const st = await this.get<TxStatus>(`${this.base}/tx/${h}`); settle(h, (w) => w.resolve(st)) } catch (e) { settle(h, (w) => w.reject(e)) }
+      }))
+    }
+  }
+
+  /** Poll GET /api/<chain>/tx/:hash until success (true), reverted (throws) or timed out (false). (lib/core/evm.ts waitSuccess) */
   waitSuccess(hash: string, timeoutMs = 60_000, onProgress?: (msg: string) => void): Promise<boolean> {
     return waitSuccess(this, hash, timeoutMs, onProgress)
   }
 
   /**
-   * Sign and send a run of transactions for one wallet, in order: GET /api/rh/account once, nonce + 1 per
-   * transaction, POST /api/rh/send each. An `approve` or `graduate` is confirmed (GET /api/rh/tx) before the next one
+   * Sign and send a run of transactions for one wallet, in order: GET /api/<chain>/account once, nonce + 1 per
+   * transaction, POST /api/<chain>/send each. An `approve` or `graduate` is confirmed (GET /api/<chain>/tx) before the next one
    * goes out; the last trade is confirmed when `confirm` is true. Returns every hash, in order. (lib/core/evm.ts sendAll)
    */
   sendAll(account: PrivateKeyAccount, txs: UnsignedTx[], opts: SendOptions = {}): Promise<string[]> {
@@ -194,7 +294,7 @@ export class Trenchy {
   /** GET /api/transfer/venues: which exchange venues are open right now. */
   transferVenues() { return this.get<TransferVenues>("/api/transfer/venues") }
   /** POST /api/transfer/batch: one source → many destinations (or many → one); one order + unsigned deposit per leg (≤ 25 legs). */
-  createTransferBatch(body: { from: { chain: "rh"; wallet: string }; to: Array<{ chain: "rh"; address: string; amount: number }>; mode?: TransferMode; venue?: string }) {
+  createTransferBatch(body: { from: { chain: string; wallet: string }; to: Array<{ chain: string; address: string; amount: number }>; mode?: TransferMode; venue?: string }) {
     return this.post<TransferBatch>("/api/transfer/batch", body)
   }
   /** GET /api/transfer/:id: awaiting_deposit → exchanging → completed (payoutHash), or a terminal failure with `help`. */
@@ -213,6 +313,11 @@ export class Trenchy {
   }
 
   // ── metadata ────────────────────────────────────────────────────────────
+
+  /** POST /api/ai/coin: a coin made from an idea (name, ticker, description, logo as a data URL). Up to ~60 s. */
+  aiCoin(p: { idea?: string; style?: "meme" | "mascot" | "clean" }) {
+    return this.call<AiCoin>("/api/ai/coin", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(p), timeoutMs: 120_000 } as RequestInit)
+  }
 
   /** POST /api/ipfs (multipart): pin the image + metadata. Robinhood creates use `metadata.image`. Pass the browser's FormData straight through. */
   async uploadMetadata(form: FormData): Promise<{ metadataUri: string; metadata?: { image?: string; [k: string]: unknown } }> {

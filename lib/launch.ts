@@ -1,49 +1,50 @@
 /**
- * A pons launch in local mode: the executor in lib/core/launch.ts (create → wait for success → bundle buys at once →
- * snipers staggered → holders over the window) run by this server on the wallet folder (lib/env.ts).
+ * A pons launch in local mode: the executor in lib/core/launch.ts (read it top to bottom: plan, wallets, funding,
+ * create, bundle, after the launch) run by this server on the wallet folder (lib/env.ts).
  *
- * Progress goes to an in-memory log the route streams as server-sent events (GET /api/launch/:id/log); the result
- * lands in `_app/pons-starter/launches.json`.
+ * The record goes to launches.json in _app/<app>-starter/; every stage is kept in server memory and streamed as
+ * server-sent events from GET /api/launch/:id/events.
  */
 import * as core from "./core/launch"
 import { readLaunches, serverEnv } from "./env"
 import { serverState } from "./paths"
-import type { LaunchForm, LaunchRecord, LogEntry } from "./core/launch"
+import type { LaunchEvent, LaunchForm, LaunchRecord } from "./core/launch"
 
-export { API_FEE_PCT, GAS_RESERVE_ETH, LAUNCH_FEE_ETH, MAX_BUNDLE, MAX_EXEMPT, fundingPlan, groupSize, metadataOf, normalizeForm } from "./core/launch"
-export type { Buyer, BuyerGroup, CreatePreview, LaunchForm, LaunchRecord, LogEntry, Picked, Plan, PlanRow, Resolved, SimulateResult } from "./core/launch"
+export { groupSize, planProblems, MAX_BUNDLE_WALLETS, MAX_EXEMPT } from "./core/launch"
+export type { Buyer, BuyerGroup, LaunchEvent, LaunchForm, LaunchRecord, Picked, Plan, PlanRow, SimulateResult } from "./core/launch"
 export { readLaunches }
+
+// ── event log ───────────────────────────────────────────────────────────────
+
+const log = serverState("launchLog", () => ({ events: new Map<string, LaunchEvent[]>(), listeners: new Map<string, Set<(e: LaunchEvent) => void>>() }))
+
+export const eventsOf = (id: string): LaunchEvent[] => log.events.get(id) ?? []
+export function subscribe(id: string, cb: (e: LaunchEvent) => void): () => void {
+  if (!log.listeners.has(id)) log.listeners.set(id, new Set())
+  log.listeners.get(id)!.add(cb)
+  return () => log.listeners.get(id)?.delete(cb)
+}
+function emitter(id: string): core.Emit {
+  return (stage, message, extra = {}) => {
+    const e: LaunchEvent = { at: Date.now(), stage, message, ...extra }
+    if (!log.events.has(id)) log.events.set(id, [])
+    log.events.get(id)!.push(e)
+    for (const cb of log.listeners.get(id) ?? []) cb(e)
+    console.log(`[launch ${id.slice(0, 6)}] ${stage}: ${message}`)
+  }
+}
 
 // ── the flows, on the folder ────────────────────────────────────────────────
 
-export const resolveWallets = (f: LaunchForm) => core.resolveWallets(serverEnv(), f)
-export const planWithBalances = (f: LaunchForm) => core.planWithBalances(serverEnv(), f)
-export const fundPlan = (f: LaunchForm) => core.fundPlan(serverEnv(), f)
-export const simulate = (f: LaunchForm) => core.simulate(serverEnv(), f)
+export const devWallet = (form: LaunchForm) => core.devWallet(serverEnv(), form)
+export const fundingPlan = (form: LaunchForm) => core.fundingPlan(serverEnv(), form)
+export const fundPlan = (form: LaunchForm, note?: (msg: string) => void) => core.fundPlan(serverEnv(), form, note)
+export const simulateLaunch = (form: LaunchForm) => core.simulateLaunch(serverEnv(), form)
 
-// ── the run, in server memory ───────────────────────────────────────────────
-
-type Run = { record: LaunchRecord; log: LogEntry[]; listeners: Set<(e: LogEntry) => void> }
-const runs = serverState("launches", () => new Map<string, Run>())
-
-export const getRun = (id: string): Run | undefined => runs.get(id)
-export function onLog(id: string, cb: (e: LogEntry) => void): () => void {
-  const run = runs.get(id)
-  if (!run) return () => {}
-  run.listeners.add(cb)
-  return () => run.listeners.delete(cb)
-}
-
-/** Start a launch; returns its id at once. Follow it with onLog / the SSE route. */
-export function startLaunch(f: LaunchForm): string {
-  const record = core.newRecord(f)
-  const run: Run = { record, log: [], listeners: new Set() }
-  runs.set(record.id, run)
-  const log: core.Log = (stage, msg, extra = {}) => {
-    const e: LogEntry = { t: Date.now(), stage, msg, ...extra }
-    run.log.push(e)
-    for (const cb of run.listeners) cb(e)
-  }
-  void core.execute(serverEnv(), record, f, log)
-  return record.id
+/** Start a launch in the background; returns the record (follow it on GET /api/launch/:id/events). */
+export function startLaunch(form: LaunchForm): LaunchRecord {
+  const env = serverEnv()
+  const rec = core.prepareLaunch(env, form)
+  void core.runLaunch(env, rec, form, emitter(rec.id))
+  return rec
 }

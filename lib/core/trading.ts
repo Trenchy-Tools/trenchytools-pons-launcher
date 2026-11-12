@@ -1,126 +1,235 @@
 /**
  * Trading after the launch, shared by local mode (lib/trading.ts) and demo mode (lib/browser/engine.ts). Every trade is
  * built by POST /api/rh/trade-local (the API follows the coin from the pons curve to its Uniswap v4 pool), signed with
- * the wallet's key, sent in order with POST /api/rh/send (an `approve` confirms before the sell goes out) and confirmed
- * with GET /api/rh/tx/:hash. Live trades come from the API websocket wss://…/api/rh/data (subscribeTokenTrade): the
- * message shapes are here, the socket itself belongs to each mode. No node imports.
+ * the wallet's key, sent in order with POST /api/rh/send ([approve] trade fee) and confirmed with GET /api/rh/txs. Live
+ * trades come from the API websocket wss://…/api/rh/data (subscribeTokenTrade): the message shapes are here, the socket
+ * itself belongs to each mode. The answers have the pump.fun starter's shapes (the Trading page is the same file), with
+ * EVM names where they differ (`hash`, `eth`). No node imports.
  */
-import { sendAll } from "./evm"
-import type { Env } from "./env"
-import type { Expected } from "../trenchy"
+import { chain } from "../chain"
+import { sendAll, waitSuccess } from "./evm"
+import type { Env } from "./launch"
+import { TOTAL_SUPPLY } from "./launch"
+import type { Expected, TokenInfo } from "../trenchy"
 import { same, type WalletInfo } from "./wallet-record"
 
-export type Holding = WalletInfo & { eth: number; tokens: number }
+/** Sell all builds this many wallets' sells per burst (the API allows 25 requests a second per key) */
+const SELL_WAVE = 10
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** Every wallet with its ETH (GET /api/rh/balances?wallets=) and this coin's balance (GET /api/rh/balances?wallet=&tokens=). */
+export type Holding = WalletInfo & { eth: number; tokens: number; raw: string }
+
+/** Every wallet with its ETH and this coin's balance (GET /api/rh/balances?wallets=…&token=…, 100 per call). */
 export async function holdings(env: Env, token: string): Promise<Holding[]> {
   const wallets = env.wallets.list()
   if (!wallets.length) return []
-  const api = env.api
-  const eth = await api.rh.ethBalances(wallets.map((w) => w.publicKey))
-  const tokens = new Map<string, number>()
-  for (let i = 0; i < wallets.length; i += 6) { // six wallets at a time: one call each
-    await Promise.all(wallets.slice(i, i + 6).map(async (w) => {
-      const r = await api.rh.balances(w.publicKey, [token]).catch(() => null)
-      tokens.set(w.publicKey.toLowerCase(), Number(r?.tokens?.[0]?.balance ?? 0))
-    }))
-  }
-  return wallets.map((w) => ({ ...w, eth: eth.get(w.publicKey.toLowerCase()) ?? 0, tokens: tokens.get(w.publicKey.toLowerCase()) ?? 0 }))
+  const rows = await env.api.evm.walletBalances(wallets.map((w) => w.publicKey), token)
+  const by = new Map(rows.map((r) => [r.wallet.toLowerCase(), r]))
+  return wallets.map((w) => { const r = by.get(w.publicKey.toLowerCase()); return { ...w, eth: r?.eth ?? 0, tokens: r?.tokens ?? 0, raw: r?.raw ?? "0" } })
 }
 
-/** ETH (and, with `token`, that coin's balance) per wallet, under the names the shared pages read (`native`). */
-export async function balanceRows(env: Env, token?: string | null): Promise<Array<{ publicKey: string; native: number; eth: number; tokens?: number }>> {
-  if (token) return (await holdings(env, token)).map((h) => ({ publicKey: h.publicKey, native: h.eth, eth: h.eth, tokens: h.tokens }))
+/**
+ * GET /api/rh/token/:token: name, symbol, venue (pons curve or Uniswap v4), curve state. Priced in ETH (`quote`), and
+ * `curve.marketCapSol` carries the market cap in ETH under the name the shared Trading page reads.
+ */
+export async function tokenInfo(env: Env, token: string): Promise<Omit<TokenInfo, "curve"> & { curveAddress: string; quote: { symbol: string }; custom: false; curve: { marketCapSol: number | null; marketCapQuote: number } | null }> {
+  const t = await env.api.evm.token(token)
+  const cs = t.curveState ?? {}
+  const price = t.priceNative ?? (typeof cs.priceEth === "number" ? cs.priceEth : typeof cs.spotPriceEth === "number" ? cs.spotPriceEth : null)
+  const supply = t.totalSupply || TOTAL_SUPPLY
+  return { ...t, curveAddress: t.curve, quote: { symbol: chain.symbol }, custom: false, curve: price ? { marketCapSol: price * supply, marketCapQuote: price * supply } : null }
+}
+
+/** GET /api/wallets/balances: every wallet's ETH (`native`) and, with `token`, its balance of that coin. */
+export async function balanceRows(env: Env, token?: string | null) {
   const wallets = env.wallets.list()
-  const eth = wallets.length ? await env.api.rh.ethBalances(wallets.map((w) => w.publicKey)) : new Map<string, number>()
-  return wallets.map((w) => ({ publicKey: w.publicKey, native: eth.get(w.publicKey.toLowerCase()) ?? 0, eth: eth.get(w.publicKey.toLowerCase()) ?? 0 }))
+  if (!wallets.length) return { token: token ?? null, rows: [] as Array<{ publicKey: string; native: number; eth: number; tokens: number; raw: string }> }
+  const rows = await env.api.evm.walletBalances(wallets.map((w) => w.publicKey), token)
+  const by = new Map(rows.map((r) => [r.wallet.toLowerCase(), r]))
+  return { token: token ?? null, rows: wallets.map((w) => { const r = by.get(w.publicKey.toLowerCase()); return { publicKey: w.publicKey, native: r?.eth ?? 0, eth: r?.eth ?? 0, tokens: r?.tokens ?? 0, raw: r?.raw ?? "0" } }) }
 }
 
-export type TradeResult = { publicKey: string; hashes: string[]; hash: string; expected: Expected; confirmed: boolean }
+export type TradeResult = { publicKey: string; hash: string; hashes: string[]; action: "buy" | "sell"; expected: Expected; confirmed: boolean }
 
-/** One wallet sells `percent` of its balance ("NN%" is resolved by the API from the real balance). approve → sell → fee, in order. */
-export async function sell(env: Env, publicKey: string, token: string, percent: number, slippage = env.slippage): Promise<TradeResult> {
-  const api = env.api
+/** One wallet sells `percent` of its balance ("NN%" is resolved by the API from the real balance): [approve] sell fee, back to back. */
+export async function sell(env: Env, publicKey: string, token: string, percent: number, slippage = env.slippage, confirmMs = 60_000): Promise<TradeResult> {
   const pct = Math.max(1, Math.min(100, Math.round(percent)))
   const account = env.wallets.accountOf(publicKey) // the key must be backed up: NotBackedUpError otherwise
-  const built = await api.rh.tradeLocal({ wallet: publicKey, action: "sell", token, amount: `${pct}%`, denominatedInEth: "false", slippage })
+  const built = await env.api.evm.tradeLocal({ wallet: publicKey, action: "sell", token, amount: `${pct}%`, denominatedInEth: "false", slippage })
   let hash = ""
-  const hashes = await sendAll(api, account, built.transactions, { confirm: true, onStep: (label, h) => { if (label === "sell") hash = h } })
-  return { publicKey, hashes, hash: hash || hashes[0], expected: built.expected, confirmed: true }
+  const hashes = await sendAll(env.api, account, built.transactions, { confirm: false, pipeline: true, onStep: (label, h) => { if (label === "sell") hash = h } })
+  hash = hash || hashes[0]
+  const confirmed = await waitSuccess(env.api, hash, confirmMs).catch(() => false)
+  return { publicKey, hash, hashes, action: "sell", expected: built.expected, confirmed }
 }
 
 /** One wallet buys for `eth` ETH. */
 export async function buy(env: Env, publicKey: string, token: string, eth: number, slippage = env.slippage): Promise<TradeResult> {
-  const api = env.api
   env.wallets.assertBackedUp(publicKey)
   const account = env.wallets.accountOf(publicKey)
-  const built = await api.rh.tradeLocal({ wallet: publicKey, action: "buy", token, amount: eth, denominatedInEth: "true", slippage })
+  const built = await env.api.evm.tradeLocal({ wallet: publicKey, action: "buy", token, amount: eth, denominatedInEth: "true", slippage })
   let hash = ""
-  const hashes = await sendAll(api, account, built.transactions, { confirm: true, onStep: (label, h) => { if (label === "buy") hash = h } })
-  return { publicKey, hashes, hash: hash || hashes[0], expected: built.expected, confirmed: true }
+  const hashes = await sendAll(env.api, account, built.transactions, { confirm: false, onStep: (label, h) => { if (label === "buy") hash = h } })
+  hash = hash || hashes[0]
+  const confirmed = await waitSuccess(env.api, hash, 60_000).catch(() => false)
+  return { publicKey, hash, hashes, action: "buy", expected: built.expected, confirmed }
 }
 
 export type SellAllResult = Array<TradeResult | { publicKey: string; skipped?: string; error?: string; code?: string }>
 
-/** Sell `percent` from each wallet, one after the other (wallets holding none are skipped). */
+/**
+ * Sell `percent` from each wallet at the same instant: 1. build every sell and read every wallet's account first (in
+ * waves of SELL_WAVE), 2. send them all together ([approve] sell fee per wallet, back to back), 3. confirm them together.
+ * Wallets holding none are skipped.
+ */
 export async function sellAll(env: Env, publicKeys: string[], token: string, percent: number): Promise<SellAllResult> {
-  const out: SellAllResult = []
-  for (const pk of publicKeys) {
-    try {
-      const bal = await env.api.rh.balances(pk, [token])
-      if (!(Number(bal.tokens?.[0]?.balance ?? 0) > 0)) { out.push({ publicKey: pk, skipped: "holds none" }); continue }
-      out.push(await sell(env, pk, token, percent))
-    } catch (e) {
-      out.push({ publicKey: pk, error: e instanceof Error ? e.message : String(e), code: (e as { code?: string })?.code })
-    }
+  const api = env.api
+  const rows = await api.evm.walletBalances(publicKeys, token)
+  const held = new Map(rows.map((r) => [r.wallet.toLowerCase(), r.raw]))
+  const pct = Math.max(1, Math.min(100, Math.round(percent)))
+  const out: SellAllResult = new Array(publicKeys.length)
+  const fail = (i: number, e: unknown) => { out[i] = { publicKey: publicKeys[i], error: e instanceof Error ? e.message : String(e), code: (e as { code?: string })?.code } }
+  const waves = <T,>(xs: T[], n: number) => Array.from({ length: Math.ceil(xs.length / n) }, (_, k) => xs.slice(k * n, k * n + n))
+
+  // 1. build every sell + read every account
+  type Ready = { i: number; pk: string; built: Awaited<ReturnType<typeof api.evm.tradeLocal>>; acct: Awaited<ReturnType<typeof api.evm.account>> }
+  const ready: Ready[] = []
+  const todo = publicKeys.map((pk, i) => ({ pk, i })).filter(({ pk, i }) => {
+    if ((held.get(pk.toLowerCase()) ?? "0") !== "0") return true
+    out[i] = { publicKey: pk, skipped: "holds none" }
+    return false
+  })
+  for (const wave of waves(todo, SELL_WAVE)) {
+    await Promise.all(wave.map(async ({ pk, i }) => {
+      try {
+        env.wallets.accountOf(pk) // the key must be backed up: NotBackedUpError otherwise
+        const [built, acct] = await Promise.all([
+          api.evm.tradeLocal({ wallet: pk, action: "sell", token, amount: `${pct}%`, denominatedInEth: "false", slippage: env.slippage }),
+          api.evm.account(pk),
+        ])
+        ready.push({ i, pk, built, acct })
+      } catch (e) { fail(i, e) }
+    }))
   }
+
+  // 2. send them all in the same instant
+  const sent: Array<Ready & { hash: string; hashes: string[] }> = []
+  await Promise.all(ready.map(async (r) => {
+    try {
+      let hash = ""
+      const hashes = await sendAll(api, env.wallets.accountOf(r.pk), r.built.transactions, { confirm: false, pipeline: true, acct: r.acct, onStep: (label, h) => { if (label === "sell") hash = h } })
+      sent.push({ ...r, hash: hash || hashes[0], hashes })
+    } catch (e) { fail(r.i, e) }
+  }))
+
+  // 3. confirm them together (the status checks are batched into one request per poll)
+  await Promise.all(sent.map(async (r) => {
+    let confirmed = false
+    try { confirmed = await waitSuccess(api, r.hash, 30_000) } catch (e) { fail(r.i, e); return }
+    out[r.i] = { publicKey: r.pk, hash: r.hash, hashes: r.hashes, action: "sell", expected: r.built.expected, confirmed }
+  }))
   return out
 }
 
-/** The creator of a coin we launched (from the launch records), or null. */
-export function creatorOf(env: Env<{ token?: string; dev: string }>, token: string): string | null {
-  return env.launches.list().find((l) => l.token?.toLowerCase() === token.toLowerCase())?.dev ?? null
+export type Pnl = {
+  spent: number; received: number; net: number; trades: number; truncated: boolean
+  /** this coin still held across the wallets */
+  tokensHeld: number
+  /** what selling everything still held would bring back right now, in ETH (a live quote minus the API fee and gas); null when nothing is held */
+  exitNative: number | null
+  /** wallets still holding the coin */
+  holders: number
+  wallets: Array<{ publicKey: string; label: string; spent: number; received: number; net: number; tokens: number }>
+}
+
+/**
+ * The profit or loss of every wallet on this coin (GET /api/rh/pnl, 100 wallets per call): what they paid and got back
+ * in ETH, gas and the API fee in it. For a coin launched here, only trades since the launch count; wallets of its
+ * launches that were archived since are counted too. Wallets that never touched the coin are left out.
+ */
+export async function pnl(env: Env, token: string): Promise<Pnl> {
+  const wallets = env.wallets.list()
+  const launches = env.launches.list().filter((l) => same(l.token ?? "", token))
+  const launch = launches[0]
+  const since = launch ? Math.floor(new Date(launch.createdAt).getTime() / 1000) - 60 : undefined
+  const roleOf = new Map<string, string>()
+  for (const l of launches) {
+    const w = l.wallets
+    const add = (pk: string | undefined, role: string) => { if (pk && !roleOf.has(pk.toLowerCase())) roleOf.set(pk.toLowerCase(), role) }
+    add(w.dev, "dev (archived)"); w.bundle.forEach((pk, i) => add(pk, `bundle ${i + 1} (archived)`)); w.sniper.forEach((pk, i) => add(pk, `sniper ${i + 1} (archived)`))
+    w.holder.forEach((pk, i) => add(pk, `later buyer ${i + 1} (archived)`)); (w.volume ?? []).forEach((pk, i) => add(pk, `volume ${i + 1} (archived)`))
+  }
+  const spelled = new Map<string, string>()
+  for (const w of wallets) spelled.set(w.publicKey.toLowerCase(), w.publicKey)
+  for (const l of launches) for (const pk of [l.wallets.dev, ...l.wallets.bundle, ...l.wallets.sniper, ...l.wallets.holder, ...(l.wallets.volume ?? [])]) if (!spelled.has(pk.toLowerCase())) spelled.set(pk.toLowerCase(), pk)
+  const keys = [...spelled.values()]
+  if (!keys.length) return { spent: 0, received: 0, net: 0, trades: 0, truncated: false, tokensHeld: 0, exitNative: null, holders: 0, wallets: [] }
+  const parts = []
+  for (let i = 0; i < keys.length; i += 100) parts.push(await env.api.evm.pnl(token, keys.slice(i, i + 100), since))
+  const held = new Map((await env.api.evm.walletBalances(keys, token)).map((r) => [r.wallet.toLowerCase(), r.tokens]))
+  const label = new Map<string, string>([...roleOf.entries(), ...wallets.map((w) => [w.publicKey.toLowerCase(), w.label] as [string, string])])
+  const rows = parts.flatMap((p) => p.wallets).map((w) => ({ publicKey: w.wallet, label: label.get(w.wallet.toLowerCase()) ?? w.wallet.slice(0, 8), spent: w.spent, received: w.received, net: w.net, tokens: held.get(w.wallet.toLowerCase()) ?? 0 }))
+  const used = rows.filter((r) => r.spent || r.received || r.tokens)
+  const sum = (k: "spent" | "received" | "net") => +used.reduce((s, r) => s + r[k], 0).toFixed(9)
+  const tokensHeld = used.reduce((s, r) => s + r.tokens, 0)
+  const holders = used.filter((r) => r.tokens > 0).length
+  let exitNative: number | null = null
+  if (tokensHeld > 0) {
+    // one quote for everything held, as the biggest holder (an exact sell quote needs a wallet that holds the tokens)
+    const top = used.filter((r) => r.tokens > 0).sort((a, b) => b.tokens - a.tokens)[0]
+    const q = await env.api.evm.quote({ token, action: "sell", amount: tokensHeld, wallet: top?.publicKey }).catch(() => null)
+    if (typeof q?.ethOut === "number") exitNative = +Math.max(0, q.ethOut * (1 - chain.apiFeeRate) - holders * chain.minGas * 0.3).toFixed(9)
+  }
+  return { exitNative, holders, spent: sum("spent"), received: sum("received"), net: sum("net"), trades: parts.reduce((s, p) => s + p.trades, 0), truncated: parts.some((p) => p.truncated), tokensHeld, wallets: used }
+}
+
+/** The creator of a coin we launched (from the launch records), else the main wallet. */
+export function creatorOf(env: Env, token: string): string | null {
+  return env.launches.list().find((l) => same(l.token ?? "", token))?.wallets.dev ?? env.wallets.main()?.publicKey ?? null
 }
 
 // ── creator fees: the pons escrow (GET /api/rh/creator-fees, trade-local collectCreatorFee) ────────────────────────
 
-/** The coin's creator (our launch record, else the chain's creator fee recipient) and what it can claim. `sol` carries the ETH under the name the shared Trading page reads. */
-export async function creatorFees(env: Env<{ token?: string; dev: string }>, token: string): Promise<{ creator: string; sol: number; eth: number; claimableEth: number; pendingEth: number; sweepable: boolean; reason?: string }> {
-  const creator = creatorOf(env, token) ?? (await env.api.rh.token(token)).creator
-  const f = await env.api.rh.creatorFees(creator, token)
-  return { creator, sol: f.eth, eth: f.eth, claimableEth: f.claimableEth, pendingEth: f.curve?.pendingEth ?? 0, sweepable: f.curve?.sweepable ?? false, reason: f.curve?.reason }
+/** The coin's creator and what it can claim: the escrow now + what the coin's curve still holds. `sol` carries the ETH under the name the shared Trading page reads. */
+export async function creatorFees(env: Env, token: string) {
+  const creator = creatorOf(env, token) ?? (await env.api.evm.token(token)).creator
+  const f = await env.api.evm.creatorFees(creator, token)
+  const total = +(f.eth + (f.curve?.pendingEth ?? 0)).toFixed(9)
+  return { creator, sol: total, eth: total, claimableEth: f.claimableEth, pendingEth: f.curve?.pendingEth ?? 0, sweepable: f.curve?.sweepable ?? false, reason: f.curve?.reason }
 }
 
-/** Claim them: trade-local { action: "collectCreatorFee", token } → [sweep?] claim, signed and sent in order by the creator (its key must be here). */
-export async function collectCreatorFees(env: Env<{ token?: string; dev: string }>, token: string): Promise<{ creator: string; signature: string; hashes: string[]; confirmed: boolean }> {
-  const creator = creatorOf(env, token) ?? (await env.api.rh.token(token)).creator
+/** Claim them: trade-local { action: "collectCreatorFee", token } → [sweep] claim, signed and sent in order by the creator. */
+export async function collectCreatorFees(env: Env, token: string): Promise<{ creator: string; signature: string; hash: string; hashes: string[]; confirmed: boolean }> {
+  const creator = creatorOf(env, token) ?? (await env.api.evm.token(token)).creator
   const account = env.wallets.accountOf(creator) // the creator's key must be stored and backed up here
-  const built = await env.api.rh.tradeLocal({ wallet: creator, action: "collectCreatorFee", token })
+  const built = await env.api.evm.tradeLocal({ wallet: creator, action: "collectCreatorFee", token })
   let claim = ""
   const hashes = await sendAll(env.api, account, built.transactions, { confirm: true, onStep: (label, h) => { if (label === "claim") claim = h } })
-  return { creator, signature: claim || hashes[hashes.length - 1], hashes, confirmed: true }
+  const hash = claim || hashes[hashes.length - 1]
+  return { creator, signature: hash, hash, hashes, confirmed: true }
 }
 
 // ── live trades: wss://…/api/rh/data, subscribeTokenTrade per coin ──────────
 
-export type LiveTrade = { hash: string; token: string; type: "buy" | "sell"; trader: string; eth: number; tokens: number; priceEth: number | null; timestamp: number; ours: string | null; venue: string | null }
+export type LiveTrade = { hash: string; token: string; type: "buy" | "sell"; trader: string; eth: number; tokens: number; priceEth: number | null; marketCapEth: number | null; timestamp: number; ours: string | null; venue: string | null }
 
-export const subscribeMessage = (token: string) => JSON.stringify({ method: "subscribeTokenTrade", keys: [token] })
-export const unsubscribeMessage = (token: string) => JSON.stringify({ method: "unsubscribeTokenTrade", keys: [token] })
+/** The subscribe message for one coin on wss://…/api/rh/data. */
+export const tradeSubscription = (token: string, on = true) => JSON.stringify({ method: on ? "subscribeTokenTrade" : "unsubscribeTokenTrade", keys: [token] })
 
-/** One websocket message → a trade of `token`, or null (another coin, not a trade, not JSON). `wallets` tags our own. */
-export function parseTrade(data: string, token: string, wallets: WalletInfo[]): LiveTrade | null {
+/** One websocket message → a trade of `token`, or null (another coin, not a trade, not JSON). `ours` labels our own wallets. */
+export function parseTrade(data: string, token: string, ours: (trader: string) => WalletInfo | undefined): LiveTrade | null {
   try {
     const raw = JSON.parse(data) as Record<string, unknown>
     if ((raw.txType !== "buy" && raw.txType !== "sell") || String(raw.token ?? "").toLowerCase() !== token.toLowerCase()) return null
     const hash = String(raw.hash ?? "")
     if (!hash) return null
     const trader = String(raw.trader ?? "")
-    const ours = wallets.find((w) => same(w.publicKey, trader))
+    const w = ours(trader)
+    const eth = Number(raw.ethAmount ?? 0), tokens = Number(raw.tokenAmount ?? 0)
+    const priceEth = typeof raw.priceEth === "number" ? raw.priceEth : tokens > 0 ? eth / tokens : null
     return {
-      hash, token, type: raw.txType, trader,
-      eth: Number(raw.ethAmount ?? 0), tokens: Number(raw.tokenAmount ?? 0), priceEth: typeof raw.priceEth === "number" ? raw.priceEth : null,
-      timestamp: typeof raw.ts === "number" ? raw.ts : Date.now(), ours: ours ? `${ours.label} · ${ours.role}` : null, venue: typeof raw.venue === "string" ? raw.venue : null,
+      hash, token, type: raw.txType, trader, eth, tokens, priceEth, marketCapEth: priceEth ? priceEth * TOTAL_SUPPLY : null,
+      timestamp: typeof raw.ts === "number" ? raw.ts : Date.now(), ours: w ? `${w.label} · ${w.role}` : null, venue: typeof raw.venue === "string" ? raw.venue : null,
     }
   } catch {
     return null // not a trade

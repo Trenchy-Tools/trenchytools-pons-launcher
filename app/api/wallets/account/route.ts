@@ -8,7 +8,7 @@ export async function GET(req: Request) {
   const wallet = new URL(req.url).searchParams.get("wallet")
   if (!isAddress(wallet)) return fail(new Error("wallet: a 0x address"), 400)
   try {
-    return ok(await trenchy().rh.account(wallet))
+    return ok(await trenchy().evm.account(wallet))
   } catch (e) {
     return fail(e)
   }

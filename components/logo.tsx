@@ -1,4 +1,6 @@
-import { cn } from "@/lib/utils"
+import { cn } from "@/lib/cn"
+import { chain } from "@/lib/chain"
+import { BrandIcon } from "./ui/brand"
 
 /**
  * The trenchytools mark: a T that is also a shovel (digging in the trenches), with a pixel breaking off the handle.
@@ -25,13 +27,12 @@ export function Wordmark({ className }: { className?: string }) {
   )
 }
 
-/** Mark + wordmark + what this is, used in the header, sidebar and footer. */
+/** This tool's identity in its own bar: its launchpad's logo and its name ("pump.fun launcher"; "pump.fun" on a phone). */
 export function Logo({ className }: { className?: string }) {
   return (
     <span className={cn("inline-flex items-center gap-2", className)}>
-      <LogoMark className="h-[22px]" />
-      <Wordmark className="h-[22px]" />
-      <span className="text-muted-foreground text-[0.95em] font-normal">pons starter</span>
+      <BrandIcon src={chain.launchpadLogo} label={chain.launchpad} size={22} />
+      <span className="font-semibold whitespace-nowrap"><span className="sm:hidden">{chain.launchpad}</span><span className="hidden sm:inline">{chain.appName}</span></span>
     </span>
   )
 }

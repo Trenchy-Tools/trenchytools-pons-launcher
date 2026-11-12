@@ -12,7 +12,7 @@ export async function GET(req: Request) {
   if (!isAddress(token)) return fail(new Error("token: a 0x address"), 400)
   if (!(amount > 0)) return fail(new Error("amount must be greater than zero"), 400)
   try {
-    return ok(await trenchy().rh.quote({ token, action, amount, wallet: isAddress(wallet) ? wallet : undefined }))
+    return ok(await trenchy().evm.quote({ token, action, amount, wallet: isAddress(wallet) ? wallet : undefined }))
   } catch (e) {
     return fail(e)
   }

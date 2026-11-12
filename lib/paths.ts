@@ -5,9 +5,10 @@
  *   ./wallets             otherwise: inside the cloned repo (git-ignored), next to the code that uses it
  *
  * Wallet files live at its top level (one JSON per wallet + wallets.csv); sibling starters share the folder, each
- * tagging its files with a `chain`. This app's own state sits in `_app/pons-starter/`: settings.json and
+ * tagging its files with a `chain`. This app's own state sits in `_app/<app>-starter/`: settings.json and
  * launches.json. Nothing else is stored anywhere.
  */
+import { chain } from "./chain"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -17,7 +18,7 @@ export const BACKUP_DIR: string = (() => {
   return path.join(process.cwd(), "wallets")
 })()
 
-export const APP_DIR = path.join(BACKUP_DIR, "_app", "pons-starter")
+export const APP_DIR = path.join(BACKUP_DIR, "_app", `${chain.suiteId}-starter`)
 export const SETTINGS_FILE = path.join(APP_DIR, "settings.json")
 export const LAUNCHES_FILE = path.join(APP_DIR, "launches.json")
 

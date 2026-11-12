@@ -9,7 +9,7 @@
  * files only; everything else in the folder is left alone.
  *
  * One list of wallets. The ★ (main) wallet pays for everything, receives gathers and is the default creator; it is the
- * address in `_app/pons-starter/settings.json` `mainWallet`. The first wallet ever created becomes ★; a wallet with
+ * address in `_app/<app>-starter/settings.json` `mainWallet`. The first wallet ever created becomes ★; a wallet with
  * the old role `funding` counts as ★ when nothing is set. `role` is only a tag now (bundle / sniper / holder / trader /
  * funding), set from the rename popover; nothing is picked by role any more.
  *
@@ -303,12 +303,13 @@ export function updateWallet(publicKey: string, patch: { label?: string; role?: 
  * Archive wallets: their files move to archived/ (keys kept, never used again). The ★ wallet cannot be archived; a
  * wallet without a file is skipped. Returns what moved.
  */
-export function archiveWallets(publicKeys: string[]): { archived: string[]; dir: string } {
+/** `allowMain`: the main wallet may go too (the "Archive this main wallet" / "Replace" actions); then there is none. */
+export function archiveWallets(publicKeys: string[], allowMain = false): { archived: string[]; dir: string } {
   const main = mainWallet()
   fs.mkdirSync(ARCHIVE_DIR, { recursive: true })
   const archived: string[] = []
   for (const pk of publicKeys) {
-    if (main && same(pk, main.publicKey)) throw new Error("The dev wallet cannot be removed; make another wallet the dev wallet first")
+    if (main && same(pk, main.publicKey) && !allowMain) throw new Error("The main wallet cannot be removed; make another wallet the main wallet first")
     const file = findFile(pk)
     if (!file) continue
     fs.renameSync(file, path.join(ARCHIVE_DIR, path.basename(file)))
@@ -340,6 +341,18 @@ export function rewriteBackups(): { dir: string; files: number; restored: string
   return { dir: BACKUP_DIR, files: listWallets().length, restored, csvAdded }
 }
 
+/** Bring archived wallets back: their files move from archived/ to the folder again. Returns the ones restored. */
+export function unarchiveWallets(publicKeys: string[]): { restored: string[] } {
+  const restored: string[] = []
+  for (const pk of publicKeys) {
+    const file = findFile(pk, ARCHIVE_DIR)
+    if (!file) continue
+    fs.renameSync(file, path.join(BACKUP_DIR, path.basename(file)))
+    restored.push(pk)
+  }
+  return { restored }
+}
+
 /**
  * The wallets of a role for a launch, oldest first; when fewer exist than asked, the rest are created (and backed up)
  * on the spot. Every returned wallet has its file on disk. Used by the old `count × eth` form shape only.
@@ -359,5 +372,7 @@ export const walletStore: WalletStore = {
   main: mainWallet,
   assertBackedUp,
   accountOf,
-  create: (count, role = "trader", label) => createWallets(count, role, label).map(({ path: _p, ...w }) => { void _p; return w }),
+  // the launch code asks for exactly what is missing: 0 means none (the HTTP route keeps its "at least 1")
+  create: (count, role = "trader", label) => (count >= 1 ? createWallets(count, role, label).map(({ path: _p, ...w }) => { void _p; return w }) : []),
+  backupNote: (w) => `has its file (${w.file})`,
 }

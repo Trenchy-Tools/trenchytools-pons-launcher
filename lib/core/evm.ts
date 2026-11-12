@@ -13,8 +13,12 @@ import { formatEther, parseEther, type Address, type Hex } from "viem"
 import { privateKeyToAccount, generatePrivateKey, type PrivateKeyAccount } from "viem/accounts"
 import type { Trenchy } from "../trenchy"
 import { ApiError } from "./errors"
+import { chain } from "../chain"
 
-export const RH_CHAIN_ID = 4663
+/** the chain's id (lib/chain.ts evm.chainId); every signature is bound to it */
+export const CHAIN_ID = chain.evm!.chainId
+/** @deprecated the old name */
+export const RH_CHAIN_ID = CHAIN_ID
 
 /** One unsigned transaction as the API hands it out (`trade-local` entries, transfer deposits). `gas` may be missing. */
 export type UnsignedTx = { label?: string; to: string; data?: string; value: string; gas?: string | number; from?: string; chainId?: number }
@@ -57,8 +61,8 @@ export class Nonces {
 /** Sign one API transaction with the account data: chainId + nonce + EIP-1559 fees. Returns the raw 0x bytes for POST /api/rh/send. */
 export async function signTx(account: PrivateKeyAccount, acct: AccountData, nonces: Nonces, tx: UnsignedTx): Promise<Hex> {
   if (tx.from && tx.from.toLowerCase() !== account.address.toLowerCase()) throw new Error(`transaction is for ${tx.from}, not ${account.address}`)
-  const chainId = tx.chainId ?? acct.chainId ?? RH_CHAIN_ID
-  if (chainId !== RH_CHAIN_ID) throw new Error(`unexpected chainId ${chainId} (Robinhood Chain is ${RH_CHAIN_ID})`)
+  const chainId = tx.chainId ?? acct.chainId ?? CHAIN_ID
+  if (chainId !== CHAIN_ID) throw new Error(`unexpected chainId ${chainId} (${chain.name} is ${CHAIN_ID})`)
   return account.signTransaction({
     type: "eip1559",
     chainId,
@@ -91,7 +95,7 @@ export async function waitSuccess(api: Trenchy, hash: string, timeoutMs = 60_000
   const start = Date.now()
   let lastNote = 0
   while (Date.now() - start < timeoutMs) {
-    const s = await api.rh.tx(hash).catch(() => null)
+    const s = await api.evm.tx(hash).catch(() => null)
     if (s?.status === "success") return true
     if (s?.status === "reverted") throw new ApiError(`Transaction reverted: ${hash}`, 502, "reverted", undefined, undefined)
     if (onProgress && Date.now() - lastNote > 4000) {
@@ -103,7 +107,12 @@ export async function waitSuccess(api: Trenchy, hash: string, timeoutMs = 60_000
   return false
 }
 
-export type SendOptions = { confirm?: boolean; onStep?: (label: string, hash: string) => void; acct?: AccountData }
+/**
+ * `confirm`: wait for the trade itself (default true). `pipeline`: send an approve and the sell behind it back to back
+ * instead of waiting for the approve to confirm first: the nonces keep them in order and the API gives the sell a gas
+ * floor that does not need the approval to exist yet (a sell-all uses it so every wallet sells at once).
+ */
+export type SendOptions = { confirm?: boolean; pipeline?: boolean; onStep?: (label: string, hash: string) => void; acct?: AccountData }
 
 /**
  * Sign and send a run of transactions for one wallet, in order: GET /api/rh/account once, nonce + 1 per
@@ -111,17 +120,17 @@ export type SendOptions = { confirm?: boolean; onStep?: (label: string, hash: st
  * goes out; the last trade is confirmed when `confirm` is true. Returns every hash, in order.
  */
 export async function sendAll(api: Trenchy, account: PrivateKeyAccount, txs: UnsignedTx[], opts: SendOptions = {}): Promise<string[]> {
-  const acct = opts.acct ?? (await api.rh.account(account.address))
+  const acct = opts.acct ?? (await api.evm.account(account.address))
   const nonces = new Nonces(acct)
   const hashes: string[] = []
   let main: string | null = null // the trade itself (the last entry that is not the fee transfer)
   for (const tx of txs) {
     const raw = await signTx(account, acct, nonces, tx)
-    const { hash } = await api.rh.send(raw)
+    const { hash } = await api.evm.send(raw)
     hashes.push(hash)
     opts.onStep?.(tx.label ?? "tx", hash)
     if (tx.label !== "fee") main = hash
-    if (tx.label === "approve" || tx.label === "graduate") {
+    if (tx.label === "graduate" || (tx.label === "approve" && !opts.pipeline)) {
       if (!(await waitSuccess(api, hash, 90_000))) throw new Error(`${tx.label} ${hash.slice(0, 10)}… not confirmed in time; check GET /api/rh/tx/${hash} before retrying`)
     }
   }

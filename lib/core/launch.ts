@@ -30,6 +30,7 @@ import { fundDirect } from "./funding"
 import { notIn, type Env as BaseEnv } from "./env"
 import { chain } from "../chain"
 import { launchWalletLabel, type Role, type WalletInfo } from "./wallet-record"
+import { padById, padCoinUrl, padFeatures, type Launchpad } from "../launchpad"
 
 /** The API fee on every buy and sell (0.5 %), so a wallet funded for a buy can also pay it. */
 const API_FEE = chain.apiFeeRate
@@ -46,6 +47,11 @@ export const TOTAL_SUPPLY = chain.evm!.totalSupply
 /** where the coin is seen on its launchpad (the first of lib/chain.ts coinLinks) */
 const padLink = (token: string) => chain.coinLinks(token)[0]?.href ?? chain.explorerAddress(token)
 const SYM = chain.symbol
+/** the form's launchpad, and what it changes */
+const padOf = (f: { launchpad?: string }): Launchpad => padById(f.launchpad)
+const minBuyOf = (f: { launchpad?: string }) => padOf(f).minBuy ?? MIN_BUY
+const exemptOf = (f: { launchpad?: string }) => padOf(f).exemptList ?? chain.evm!.exemptList
+const quietOf = (f: { launchpad?: string }) => padOf(f).launchQuietS ?? chain.evm!.launchQuietS ?? 0
 const PAD = chain.launchpad
 
 /** One picked buyer: a wallet of the folder (or null = a new wallet, created at launch) and its buy, in ETH. */
@@ -65,6 +71,9 @@ export type LaunchForm = {
   twitter: string
   telegram: string
   website: string
+  /** the launchpad (lib/chain.ts launchpads; the chain's first when absent) and its create-body fields (venue, taxes, fees) */
+  launchpad?: string
+  venueOptions?: Record<string, unknown>
   /** the creator: the main wallet when empty */
   devWallet?: string
   /** the plan only: the dev wallet will be a new wallet made at launch (the Launch page then sends it as devWallet) */
@@ -172,7 +181,7 @@ export function devWallet(env: Env, form: LaunchForm): WalletInfo | null {
 export async function fundingPlan(env: Env, form: LaunchForm): Promise<Plan> {
   const need = (buy: number) => buy * (1 + API_FEE) + GAS_RESERVE
   const dev = form.devFresh ? null : devWallet(env, form)
-  const rows: PlanRow[] = [{ role: "dev", label: form.devFresh ? "new dev wallet (made at launch)" : dev?.label ?? (form.devWallet ? `${form.devWallet.slice(0, 8)}… (${notIn(env.wallets)})` : "Main wallet"), publicKey: form.devFresh ? null : dev?.publicKey ?? form.devWallet ?? null, buy: form.devBuySol, needSol: need(form.devBuySol) + CREATE_COST }]
+  const rows: PlanRow[] = [{ role: "dev", label: form.devFresh ? "new dev wallet (made at launch)" : dev?.label ?? (form.devWallet ? `${form.devWallet.slice(0, 8)}… (${notIn(env.wallets)})` : "Main wallet"), publicKey: form.devFresh ? null : dev?.publicKey ?? form.devWallet ?? null, buy: form.devBuySol, needSol: need(form.devBuySol) + padFeatures(padOf(form)).createCost }]
   const group = (role: Exclude<Role, "funding" | "trader">, g: BuyerGroup) => {
     const picked = explicit(g)
     if (picked) {
@@ -198,9 +207,11 @@ export async function fundingPlan(env: Env, form: LaunchForm): Promise<Plan> {
   }
   const warnings: string[] = []
   const exemptable = rows.filter((r) => r.role !== "dev").length
-  if (chain.evm!.exemptList && exemptable > MAX_EXEMPT) warnings.push(`${exemptable} buyer and volume wallets, but ${PAD} exempts at most ${MAX_EXEMPT} from the launch-window snipe tax: the last ${exemptable - MAX_EXEMPT} pay it.`)
-  if (form.devBuySol > 0 && form.devBuySol < MIN_BUY) warnings.push(`The dev buy must be at least ${MIN_BUY} ${SYM} on ${PAD} (or 0).`)
-  return { rows, total: sum(rows.map((r) => r.needSol)), tipSol: 0, useLut: false, quote: NATIVE_QUOTE, custom: false, mayhem: false, holderReward: false, creatorFeeBps: 0, totalQuote: 0, shortfalls: [], refusal: null, ok: !(form.devBuySol > 0 && form.devBuySol < MIN_BUY), warnings }
+  const PAD = padOf(form).name, minBuy = minBuyOf(form)
+  if (padOf(form).disabled) warnings.push(`${PAD} cannot launch right now: ${padOf(form).disabled}`)
+  if (exemptOf(form) && exemptable > MAX_EXEMPT) warnings.push(`${exemptable} buyer and volume wallets, but ${PAD} exempts at most ${MAX_EXEMPT} from the launch-window snipe tax: the last ${exemptable - MAX_EXEMPT} pay it.`)
+  if (form.devBuySol > 0 && form.devBuySol < minBuy) warnings.push(`The dev buy must be at least ${minBuy} ${SYM} on ${PAD} (or 0).`)
+  return { rows, total: sum(rows.map((r) => r.needSol)), tipSol: 0, useLut: false, quote: NATIVE_QUOTE, custom: false, mayhem: false, holderReward: false, creatorFeeBps: 0, totalQuote: 0, shortfalls: [], refusal: null, ok: !(form.devBuySol > 0 && form.devBuySol < minBuy) && !padOf(form).disabled, warnings }
 }
 
 /** One line per problem, for an error message or the launch log. */
@@ -291,7 +302,9 @@ export function prepareLaunch(env: Env, form: LaunchForm): LaunchRecord {
   if (!dev) throw new Error(form.devWallet ? `Main wallet ${form.devWallet.slice(0, 10)}… is ${notIn(env.wallets, true)}` : "No main wallet yet: create one at the top of the Launch or Wallets page")
   if (!form.name || !form.symbol) throw new Error("Name and symbol are required")
   if (!form.image) throw new Error("Upload the image first (its link is missing)")
-  if (form.devBuySol > 0 && form.devBuySol < MIN_BUY) throw new Error(`The dev buy must be at least ${MIN_BUY} ${SYM} on ${PAD} (or 0)`)
+  const pad = padOf(form)
+  if (pad.disabled) throw new Error(`${pad.name} cannot launch right now: ${pad.disabled}`)
+  if (form.devBuySol > 0 && form.devBuySol < minBuyOf(form)) throw new Error(`The dev buy must be at least ${minBuyOf(form)} ${SYM} on ${pad.name} (or 0)`)
   if (groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} bundle buyers; add the rest as later buyers`)
   env.wallets.assertBackedUp(dev.publicKey)
   const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
@@ -307,6 +320,9 @@ const errText = (e: unknown) => (e instanceof ApiError ? `${e.message}${e.code ?
 export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, emit: Emit): Promise<void> {
   const api = env.api
   const saveLaunch = (r: LaunchRecord) => env.launches.save(r)
+  const pad = padOf(form)
+  const PAD = pad.name
+  const padLink = (t: string) => padCoinUrl(pad, t)
   try {
     // 0. plan ("new wallet" rows are created first)
     form = materialize(env, form)
@@ -322,9 +338,9 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     const volume = form.volume?.wallets ?? []
     rec.wallets = { dev: rec.wallets.dev, bundle: bundle.map((w) => w.publicKey), sniper: snipers.map((w) => w.publicKey), holder: holders.map((w) => w.publicKey), volume }
     // the exempt list: bundle first (they buy in the launch window), then snipers, volume, later buyers
-    const exempt = !chain.evm!.exemptList ? [] : [...new Set([...rec.wallets.bundle, ...rec.wallets.sniper, ...volume, ...rec.wallets.holder].filter((pk) => !same(pk, rec.wallets.dev)))].slice(0, MAX_EXEMPT)
+    const exempt = !exemptOf(form) ? [] : [...new Set([...rec.wallets.bundle, ...rec.wallets.sniper, ...volume, ...rec.wallets.holder].filter((pk) => !same(pk, rec.wallets.dev)))].slice(0, MAX_EXEMPT)
     saveLaunch(rec)
-    emit("wallets", `Creator ${rec.wallets.dev.slice(0, 10)}… · ${bundle.length} bundle · ${snipers.length} sniper · ${holders.length} later buyer${volume.length ? ` · ${volume.length} volume` : ""} wallet(s), all backed up${chain.evm!.exemptList ? ` · ${exempt.length} on the snipe-tax exempt list` : ""}`)
+    emit("wallets", `Creator ${rec.wallets.dev.slice(0, 10)}… · ${bundle.length} bundle · ${snipers.length} sniper · ${holders.length} later buyer${volume.length ? ` · ${volume.length} volume` : ""} wallet(s), all backed up${exemptOf(form) ? ` · ${exempt.length} on the snipe-tax exempt list` : ""}`)
 
     // 2. funding
     if (form.fundFirst) {
@@ -336,25 +352,33 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     }
     const devNeed = plan.rows[0].needSol
     const devAcct = await api.evm.account(rec.wallets.dev)
-    if (Number(devAcct.balanceEth) < devNeed - GAS_RESERVE / 2) throw new AppError(`The dev wallet holds ${Number(devAcct.balanceEth).toFixed(5)} ${SYM}; the create needs about ${devNeed.toFixed(5)} ${SYM} (dev buy + launch fee + API fee + gas). Nothing was sent.`, "insufficient_funds", 409, "Send ${SYM} to the main wallet, then launch again")
+    if (Number(devAcct.balanceEth) < devNeed - GAS_RESERVE / 2) throw new AppError(`The dev wallet holds ${Number(devAcct.balanceEth).toFixed(5)} ${SYM}; the create needs about ${devNeed.toFixed(5)} ${SYM} (dev buy + launch fee + API fee + gas). Nothing was sent.`, "insufficient_funds", 409, `Send ${SYM} to the main wallet, then launch again`)
 
     // 3. the create: POST /api/rh/trade-local { action: "create" } → create + fee, predicted.token
-    emit("build", `Building the create + dev buy ${form.devBuySol} ${SYM} (POST ${chain.evm!.api}/trade-local)`)
-    const built = await api.evm.tradeLocal({ wallet: rec.wallets.dev, action: "create", tokenMetadata: metadataOf(form), amount: form.devBuySol, ...(exempt.length ? { exemptWallets: exempt } : {}), slippage: form.slippage })
-    const token = built.predicted?.token
-    if (!token) throw new Error("the API did not return predicted.token for the create")
-    rec.token = token
-    saveLaunch(rec)
-    emit("mint", `Coin will be ${token} (${PAD} launch fee ${built.launchFeeEth ?? 0} ${SYM}${form.devBuySol > 0 ? `, the dev buy gets ~${Math.round(built.expected.tokens).toLocaleString()} tokens` : ""})`, { token })
+    emit("build", `Building the create on ${PAD} + dev buy ${form.devBuySol} ${SYM} (POST ${chain.evm!.api}/trade-local)`)
+    const built = await api.evm.tradeLocal({ wallet: rec.wallets.dev, action: "create", tokenMetadata: metadataOf(form), amount: form.devBuySol, ...(exempt.length ? { exemptWallets: exempt } : {}), slippage: form.slippage, ...(form.venueOptions ?? {}) })
+    // most launchpads let the API predict the coin; the rest (Ascend, a Volta CREATE) are read from the receipt below
+    let token = built.predicted?.token ?? ""
+    if (token) { rec.token = token; saveLaunch(rec) }
+    emit("mint", `${token ? `Coin will be ${token}` : "The coin's address comes from the create's receipt"} (${PAD} launch fee ${built.launchFeeEth ?? 0} ${SYM}${form.devBuySol > 0 ? `, the dev buy gets ~${Math.round(built.expected.tokens).toLocaleString()} tokens` : ""})`, { token })
     const hashes = await sendAll(api, env.wallets.accountOf(rec.wallets.dev), built.transactions, { confirm: false, acct: devAcct })
     const createHash = hashes[built.transactions.findIndex((t) => t.label === "create")] ?? hashes[0]
     rec.hashes.create = createHash
     saveLaunch(rec)
     if (!(await waitSuccess(api, createHash, 120_000, (m) => emit("confirm", m)))) throw new Error(`Create ${createHash.slice(0, 12)}… not confirmed in 2 minutes; check ${chain.explorerTx(createHash)} before launching again`)
-    emit("confirm", `Create confirmed (${createHash.slice(0, 12)}…)`, { hash: createHash })
+    // the coin the create really made (GET <api>/created): fills an unpredicted address and corrects a stale one
+    const made = await api.evm.created(createHash).catch(() => null)
+    if (made?.token && made.token.toLowerCase() !== token.toLowerCase()) {
+      if (token) emit("warning", `The coin landed at ${made.token}, not the predicted ${token}`)
+      token = made.token
+    }
+    if (!token) throw new Error(`Create ${createHash.slice(0, 12)}… landed but its coin could not be read; find it on ${chain.explorerTx(createHash)}`)
+    rec.token = token
+    saveLaunch(rec)
+    emit("confirm", `Create confirmed (${createHash.slice(0, 12)}…): ${token}`, { hash: createHash, token })
 
     // a launchpad that taxes the first seconds (Clanker: 99 % falling to the normal tax over 20 s) is left alone until then
-    const quiet = chain.evm!.launchQuietS ?? 0
+    const quiet = quietOf(form)
     if (quiet > 0 && (bundle.length || snipers.length || holders.length || volume.length)) {
       emit("wait", `Waiting ${quiet} s before any other buy: ${PAD} charges a launch-window fee on buys in the first seconds`)
       await sleep(quiet * 1000)
@@ -370,7 +394,8 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     // 5. after the launch: auto-sell watches the coin while the snipers and later buyers buy; auto-claim runs on its own
     const stop = { sold: false }
     const selling = form.autoSell && autoSellArmed(form.autoSell) ? autoSell(env, rec, form.autoSell, token, emit, stop) : null
-    if (form.claim) void autoClaim(env, rec, token, form.claim, emit)
+    if (form.claim && padFeatures(pad).creatorFees) void autoClaim(env, rec, token, form.claim, emit)
+    else if (form.claim) emit("claim", `Auto-claim skipped: ${PAD} creator fees are not claimable through the API yet`)
     const volumeRun = volume.length ? volumeMaker(env, rec, form.volume!, token, emit, stop) : null
 
     if (snipers.length) {
@@ -667,8 +692,8 @@ export async function simulateLaunch(env: Env, form: LaunchForm): Promise<Simula
   if (plan.warnings.length) checks.push({ name: "plan", ok: plan.ok, detail: plan.warnings.join(" ") })
   checks.push({ name: "metadata", ok: !!form.image, detail: form.image ? `image ${form.image}` : "no image yet: pick one (the dry run used a placeholder)" })
   if (groupSize(form.bundle) > MAX_BUNDLE_WALLETS) checks.push({ name: "bundle", ok: false, detail: `at most ${MAX_BUNDLE_WALLETS} bundle buyers` })
-  const exempt = chain.evm!.exemptList ? plan.rows.filter((r) => r.role !== "dev" && r.publicKey).map((r) => r.publicKey!).slice(0, MAX_EXEMPT) : []
-  const built = await api.evm.tradeLocal({ wallet: creator.publicKey, action: "create", tokenMetadata: metadataOf({ ...form, name: form.name || "Simulation", symbol: form.symbol || "SIM" }, form.image || "https://trenchy.tools/og.png"), amount: form.devBuySol, ...(exempt.length ? { exemptWallets: exempt } : {}), slippage: form.slippage })
+  const exempt = exemptOf(form) ? plan.rows.filter((r) => r.role !== "dev" && r.publicKey).map((r) => r.publicKey!).slice(0, MAX_EXEMPT) : []
+  const built = await api.evm.tradeLocal({ wallet: creator.publicKey, action: "create", tokenMetadata: metadataOf({ ...form, name: form.name || "Simulation", symbol: form.symbol || "SIM" }, form.image || "https://trenchy.tools/og.png"), amount: form.devBuySol, ...(exempt.length ? { exemptWallets: exempt } : {}), slippage: form.slippage, ...(form.venueOptions ?? {}) })
   const simulation = await api.evm.simulate(built.transactions)
   const failed = simulation.steps.find((s) => !s.ok)
   checks.push({ name: "simulation", ok: simulation.ok, detail: simulation.ok ? `create + dev buy simulates fine (${simulation.steps.map((s) => s.label).join(", ")}${form.devBuySol > 0 ? `, ~${Math.round(built.expected.tokens).toLocaleString()} tokens for ${form.devBuySol} ${SYM}` : ""}; coin would be ${built.predicted?.token ?? "?"})` : `simulation failed at ${failed?.label ?? "a step"}: ${failed?.error ?? "reverted"}` })

@@ -5,6 +5,8 @@
  * themselves, so another chain (the pons starter on Robinhood Chain, any EVM chain) is mostly a new copy of this file.
  * See PORTING.md for the rest (the API client, the launch executor, the signer).
  */
+import type { Launchpad } from "./launchpad"
+
 export type ChainConfig = {
   /** the chain, as people say it ("Solana", "Robinhood Chain") */
   name: string
@@ -97,6 +99,8 @@ export type ChainConfig = {
     /** seconds after the create before any other buy (a launchpad that taxes its first seconds, e.g. Clanker's 20 s anti-snipe) */
     launchQuietS?: number
   }
+  /** the launchpads a launch can go to (lib/launchpad.ts); the first is the default */
+  launchpads: Launchpad[]
   features: {
     /** Solana: empty token accounts hold rent that "Close empty token accounts" recovers */
     tokenAccounts: boolean
@@ -120,10 +124,10 @@ export const chain: ChainConfig = {
   name: "Robinhood Chain",
   symbol: "ETH",
   launchpad: "pons",
-  appName: "pons launcher",
+  appName: "Robinhood launcher",
   suiteId: "pons",
   logo: "/logos/chains/robinhood.svg",
-  launchpadLogo: "/logos/launchpads/pons.png",
+  launchpadLogo: "/logos/chains/robinhood.svg",
   explorer: { name: "Blockscout", logo: "/logos/terminals/blockscout.svg" },
   coinParam: "token",
   coinNoun: "token address",
@@ -168,5 +172,12 @@ export const chain: ChainConfig = {
   vanitySuffix: null,
   evm: { api: "/api/rh", chainId: 4663, ws: true, exemptList: true, minBuy: 0.0001, totalSupply: 1_000_000_000, transferChain: "rh" },
   // creator fees: the pons escrow (70 % of the curve fee + snipe tax, plus the creator tax), claimed by the dev wallet
+  launchpads: [
+    { id: "pons", name: "pons", logo: "/logos/launchpads/pons.png", site: "https://pons.fun", note: "bonding curve → Uniswap v4 · your buyers skip the launch-window snipe tax (exempt list, up to 31)", body: { venue: "pons" }, coinUrl: (t) => `https://ponsfamily.com/launchpad/${t}`, exemptList: true },
+    { id: "pools-trade", name: "pools.trade", logo: "/logos/launchpads/pools-trade.png", site: "https://pools.trade", note: "a Uniswap v4 pool (0.25 % fee) from the launch block, no curve; the dev buy is the next transaction", body: { venue: "pools-trade" }, settings: [{ field: "creatorFees", label: "Creator fees", kind: "toggle", default: true, help: "split the pool's LP fees with you" }], exemptList: false, creatorFees: false, createCost: 0.0005, createCostNote: "gas for the create" },
+    { id: "circus", name: "circus", logo: "/logos/launchpads/circus.png", site: "https://circus.fun", note: "bonding curve (1 % each side); coins cannot be transferred until they graduate, only sold back", body: { venue: "circus" }, exemptList: false, creatorFees: false, createCost: 0.0008, createCostNote: "circus's 0.0005 ETH launch fee + gas" },
+    { id: "sushi", name: "Sushi", logo: "/logos/launchpads/sushi.png", site: "https://www.sushi.com/robinhood/launchpad", note: "a Sushi V3 1 % pool holding 97 % of the supply, no curve", body: { venue: "sushi" }, exemptList: false, creatorFees: false, createCost: 0.0008, createCostNote: "Sushi's launch fee + gas" },
+    { id: "pools-fun", name: "pools.fun", logo: "/logos/launchpads/poolsfun.png", site: "https://pools.fun", note: "a Sushi V3 1 % pool, no curve", body: { venue: "pools-fun" }, exemptList: false, creatorFees: false, createCost: 0.0005, createCostNote: "gas for the create" },
+  ],
   features: { tokenAccounts: false, creatorFees: true, mayhem: false, sameBlock: false, pairs: false, holderRewards: false },
 }

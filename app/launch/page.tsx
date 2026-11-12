@@ -31,6 +31,7 @@ import { Toggle } from "@/components/ui/toggle"
 import { failureOf, get, post, subscribe, walletsChanged, type Failure } from "@/lib/api"
 import { DEMO, TAB_NOTE } from "@/lib/browser/demo"
 import { chain } from "@/lib/chain"
+import { padBody, padById, padDefaults, padFeatures } from "@/lib/launchpad"
 import { cn } from "@/lib/cn"
 import { APP_NAME, launchWalletLabel } from "@/lib/core/wallet-record"
 import { Q, type HelpKey } from "@/lib/help"
@@ -66,6 +67,8 @@ type SavedLaunch = {
   gap: { from: string; to: string }; maxOutside: string
   autoOn: boolean; auto: Record<string, string>; claimOn: boolean; claimWhen: "sold" | "after"; claimMin: string
   volOn: boolean; vol: { count: number; budget: string; pace: "light" | "normal" | "heavy"; minutes: string; size?: "calm" | "normal" | "wild" }
+  /** the launchpad and its settings (absent on launches saved before there was a choice) */
+  padId?: string; padVals?: Record<string, string | boolean>
 }
 const readLast = (): SavedLaunch | null => { try { const r = JSON.parse(window.localStorage.getItem(LAST_KEY) ?? "null"); return r?.v === 1 ? r : null } catch { return null } }
 /** The image as a data URL (kept only when small enough for browser storage). */
@@ -98,8 +101,6 @@ const API_FEE_RATE = chain.apiFeeRate
 /** native amounts: the cost lines, and a shorter form for the button and the random amounts */
 const DEC = chain.decimals
 const DEC_SHORT = chain.decimals - 1
-/** "More coin options" exists only where the chain has one: pairs, a vanity address, Mayhem, holder rewards */
-const HAS_COIN_OPTIONS = chain.features.pairs || !!chain.vanitySuffix || chain.features.mayhem || chain.features.holderRewards
 const GAS_BUFFER = chain.gasBuffer
 
 /** One part of the cost: a label, an optional note under it, the amount (muted = fees and buffers). */
@@ -182,7 +183,7 @@ export default function LaunchPage() {
   const [quoteMint, setQuoteMint] = React.useState(SOL_PAIR.mint)
   const [mayhem, setMayhem] = React.useState(false)
   const [holderReward, setHolderReward] = React.useState(false)
-  const [useJito, setUseJito] = React.useState(chain.features.sameBlock)
+  const [useJito, setUseJito] = React.useState(padFeatures(chain.launchpads[0]).sameBlock)
   const [fundFirst, setFundFirst] = React.useState(true)
   // speed, bundle extras, after the launch
   const [speed, setSpeed] = React.useState<"normal" | "fast" | "turbo">("normal")
@@ -218,11 +219,29 @@ export default function LaunchPage() {
   const [done, setDone] = React.useState<"live" | "error" | null>(null)
   const logRef = React.useRef<HTMLDivElement>(null)
 
+  // the launchpad: which one, its settings, and the chain's switches as it changes them
+  const [padId, setPadId] = React.useState(chain.launchpads[0].id)
+  const [padVals, setPadVals] = React.useState<Record<string, string | boolean>>(() => padDefaults(chain.launchpads[0]))
+  const pad = padById(padId)
+  const feat = padFeatures(pad)
+  const hasCoinOptions = feat.pairs || !!feat.vanitySuffix || feat.mayhem || feat.holderRewards
+  /** Another launchpad: its default settings, and every option it does not have switched off. */
+  const pickPad = (id: string, vals?: Record<string, string | boolean>) => {
+    const p = padById(id)
+    if (p.disabled) return
+    const pf = padFeatures(p)
+    setPadId(p.id); setPadVals({ ...padDefaults(p), ...(vals ?? {}) })
+    setUseJito(pf.sameBlock)
+    if (!pf.vanitySuffix) setMintMode("random")
+    if (!pf.mayhem) setMayhem(false)
+    if (!pf.holderRewards) setHolderReward(false)
+    if (!pf.pairs) setQuoteMint(SOL_PAIR.mint)
+  }
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setF((s) => ({ ...s, [k]: e.target.value }))
   const pair = pairs.find((p) => p.mint === quoteMint) ?? SOL_PAIR
   const custom = pair.source !== "sol"
   /** what the coin is bought in: the chosen pair where the chain has pairs, else the native coin */
-  const sym = chain.features.pairs ? pair.symbol : chain.symbol
+  const sym = feat.pairs ? pair.symbol : chain.symbol
   const mayhemAllowed = pair.source === "sol" || pair.source === "global"
   const feeAllowed = pair.source === "quoteControl" || pair.source === "pumpCoin"
   const dev = devWallet || main
@@ -232,13 +251,15 @@ export default function LaunchPage() {
   /** The form the routes take (lib/core/form.ts). `publicKey: null` rows are new wallets; the launch resolves them first. */
   const form = (meta: Meta = { metadataUri: "", image: "" }, rows: { bundle: Row[]; snipers: Row[]; holders: Row[]; volume?: string[]; dev?: string } = { bundle, snipers, holders }) => ({
     name: f.name, symbol: f.symbol, description: f.description, twitter: normalizeLink("twitter", f.twitter), telegram: normalizeLink("telegram", f.telegram), website: normalizeLink("website", f.website), metadataUri: meta.metadataUri, image: meta.image,
-    mint: { mode: mintMode },
-    quoteMint: custom ? pair.mint : "SOL", mayhemMode: mayhem && mayhemAllowed, holderReward, creatorFeeBps: feeAllowed ? n(f.creatorFeeBps) : 0,
+    mint: { mode: feat.vanitySuffix ? mintMode : "random" },
+    quoteMint: custom && feat.pairs ? pair.mint : "SOL", mayhemMode: mayhem && mayhemAllowed && feat.mayhem, holderReward: holderReward && feat.holderRewards, creatorFeeBps: feeAllowed && feat.pairs ? n(f.creatorFeeBps) : 0,
+    // the launchpad: its id and the create-body fields it takes (venue, platform, taxes, fees)
+    launchpad: pad.id, venueOptions: padBody(pad, padVals),
     devWallet: rows.dev || devWallet || undefined, devFresh: devMode === "new" && !rows.dev, devBuySol: n(f.devBuySol),
     bundle: { wallets: rows.bundle.map((r) => ({ publicKey: r.publicKey, amount: n(r.amount) })) },
     snipers: { wallets: rows.snipers.map((r) => ({ publicKey: r.publicKey, amount: n(r.amount) })), gapMs: n(f.sniperGapMs, 400) },
     holders: { wallets: rows.holders.map((r) => ({ publicKey: r.publicKey, amount: n(r.amount) })), delayS: n(f.holderDelayS, 10), windowS: n(f.holderWindowS, 60) },
-    fundFirst, useJito, slippage: n(f.slippage, 15),
+    fundFirst, useJito: useJito && feat.sameBlock, slippage: n(f.slippage, 15),
     speed,
     bundleGap: useJito ? undefined : { fromMs: n(gap.from), toMs: n(gap.to) },
     bundleMaxOutside: useJito ? 0 : n(maxOutside),
@@ -280,7 +301,7 @@ export default function LaunchPage() {
     if (amountMode === "random" && !perWallet) setBundle((b) => randomize(b))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amountMode, perWallet, range.from, range.to, bundle.length])
-  const planKey = JSON.stringify([devMode, volOn && vol, speed, f.devBuySol, devWallet, bundle, snipers, holders, useJito, f.slippage, quoteMint, mayhem && mayhemAllowed, holderReward, feeAllowed ? f.creatorFeeBps : ""])
+  const planKey = JSON.stringify([padId, padVals, devMode, volOn && vol, speed, f.devBuySol, devWallet, bundle, snipers, holders, useJito, f.slippage, quoteMint, mayhem && mayhemAllowed, holderReward, feeAllowed ? f.creatorFeeBps : ""])
   React.useEffect(() => {
     const t = setTimeout(() => { post<Plan>("/api/launch/plan", form()).then(setPlan).catch(() => {}) }, 300)
     return () => clearTimeout(t)
@@ -387,7 +408,7 @@ export default function LaunchPage() {
       v: 1, savedAt: new Date().toISOString(), f: { ...f }, image: img?.dataUrl ? img : undefined,
       devMode, devPick, perWallet, bundleEach, bundle: amounts(bundle), perWalletH, holdersEach, holders: amounts(holders), snipers: amounts(snipers),
       amountMode, range, quoteMint, mayhem, holderReward, useJito, fundFirst, speed, gap, maxOutside,
-      autoOn, auto: { ...auto }, claimOn, claimWhen, claimMin, volOn, vol,
+      autoOn, auto: { ...auto }, claimOn, claimWhen, claimMin, volOn, vol, padId, padVals,
     }
     try { window.localStorage.setItem(LAST_KEY, JSON.stringify(saved)) } catch {
       try { window.localStorage.setItem(LAST_KEY, JSON.stringify({ ...saved, image: undefined })) } catch { /* storage full: nothing saved */ }
@@ -406,11 +427,12 @@ export default function LaunchPage() {
     setPerWallet(l.perWallet); setBundleEach(l.bundleEach); setBundle(rows(l.bundle))
     setPerWalletH(l.perWalletH); setHoldersEach(l.holdersEach); setHolders(rows(l.holders)); setSnipers(rows(l.snipers))
     setAmountMode(l.amountMode); setRange(l.range)
-    setQuoteMint(l.quoteMint); setMayhem(l.mayhem); setHolderReward(l.holderReward); setUseJito(l.useJito && chain.features.sameBlock); setFundFirst(l.fundFirst); setSpeed(l.speed)
+    setQuoteMint(l.quoteMint); setMayhem(l.mayhem); setHolderReward(l.holderReward); setUseJito(l.useJito && padFeatures(padById(l.padId)).sameBlock); setFundFirst(l.fundFirst); setSpeed(l.speed)
     setGap(l.gap); setMaxOutside(l.maxOutside)
     setAutoOn(l.autoOn); setAuto((cur) => ({ ...cur, ...l.auto } as typeof cur)); setClaimOn(l.claimOn); setClaimWhen(l.claimWhen); setClaimMin(l.claimMin)
     setVolOn(l.volOn); setVol({ ...l.vol, size: l.vol.size ?? "normal" })
     setMintMode("random")
+    if (l.padId && !padById(l.padId).disabled) pickPad(l.padId, l.padVals)
     toast({ tone: "ok", title: `Loaded the settings of ${l.f.name || "your last launch"}${l.f.symbol ? ` (${l.f.symbol})` : ""}`, detail: `Buyers come back as new wallets with the same amounts. Change the name and symbol for a new coin.${l.image ? "" : " Add the image again."}` })
   }
   const autofill = () => run("autofill", async () => {
@@ -435,7 +457,7 @@ export default function LaunchPage() {
     const lut = plan.useLut ? 0.02 : 0
     let buys = 0, volume = 0, fee = 0, buffer = 0, wallets = 0, buyers = 0
     for (const r of plan.rows) {
-      const extra = r.role === "dev" ? tip + lut + chain.createCost : 0
+      const extra = r.role === "dev" ? tip + lut + feat.createCost : 0
       const base = r.needSol - extra
       wallets++
       if (r.role === "trader") { volume += Math.max(0, base - GAS_BUFFER); buffer += Math.min(base, GAS_BUFFER); continue }
@@ -446,7 +468,7 @@ export default function LaunchPage() {
     }
     const have = mainBalance
     const state: "short" | "ok" | "unknown" = have === undefined ? "unknown" : have < plan.total ? "short" : "ok"
-    const create = plan.rows.some((r) => r.role === "dev") ? chain.createCost : 0
+    const create = plan.rows.some((r) => r.role === "dev") ? feat.createCost : 0
     return { buys, volume, fee, buffer, tip, lut, create, wallets, buyers, state, missing: have === undefined ? 0 : plan.total - have, left: have === undefined ? 0 : have - plan.total }
   })() : null
   const short = fundFirst && plan !== null && mainBalance !== undefined && mainBalance < plan.total
@@ -456,7 +478,7 @@ export default function LaunchPage() {
     const fresh = [...bundle, ...holders].filter((r) => !r.publicKey).length + (volOn ? vol.count : 0) + (devMode === "new" ? 1 : 0)
     if (fresh) out.push(`${fresh} new wallet${fresh === 1 ? " is" : "s are"} made and added to your Wallets list${DEMO ? " (their keys download as a file)" : ""}.`)
     if (fundFirst && (bundle.length || holders.length || volOn || devMode !== "main")) out.push(devMode !== "main" && !(bundle.length || holders.length || volOn) ? "Your main wallet sends the dev wallet what it needs." : "Your main wallet sends each of them what it needs.")
-    out.push(`${f.symbol || "Your coin"} is created on ${chain.launchpad} and your ${devName} buys ${n(f.devBuySol)} ${sym}${bundle.length ? (useJito ? `; ${bundle.length} bundle wallet${bundle.length === 1 ? "" : "s"} buy in the same block` : `; then ${bundle.length} bundle wallet${bundle.length === 1 ? "" : "s"} buy right after, one by one`) : ""}.`)
+    out.push(`${f.symbol || "Your coin"} is created on ${pad.name} and your ${devName} buys ${n(f.devBuySol)} ${sym}${bundle.length ? (useJito ? `; ${bundle.length} bundle wallet${bundle.length === 1 ? "" : "s"} buy in the same block` : `; then ${bundle.length} bundle wallet${bundle.length === 1 ? "" : "s"} buy right after, one by one`) : ""}.`)
     if (holders.length) out.push(`${holders.length} later buyer${holders.length === 1 ? "" : "s"} buy one by one over ${n(f.holderWindowS, 60)} s, starting ${n(f.holderDelayS, 10)} s after the launch.`)
     if (volOn) out.push(`The volume maker trades ${n(vol.budget)} ${chain.symbol} across ${vol.count} wallets for up to ${n(vol.minutes, 10)} min${vol.size === "wild" ? " in big runs of buys and sells" : vol.size === "calm" ? " in small trades" : ""}, and stops as soon as your ${devName} wallet has sold everything.`)
     if (autoOn) {
@@ -471,7 +493,7 @@ export default function LaunchPage() {
     out.push("The Trading page opens on your coin: buy or sell from any wallet there at any time.")
     return out
   })()
-  const blocker = devMode === "pick" && !devPick ? "Pick the dev wallet (Who buys at launch)" : !main ? "Create the main wallet first (top of the page)" : !ready ? "Add an image, a name and a symbol" : plan && !plan.ok ? "Fix the cost card first" : short ? `Not enough ${chain.symbol}: send ${(plan!.total - mainBalance!).toFixed(DEC)} more` : null
+  const blocker = pad.disabled ? `${pad.name} cannot launch right now: pick another launchpad` : devMode === "pick" && !devPick ? "Pick the dev wallet (Who buys at launch)" : !main ? "Create the main wallet first (top of the page)" : !ready ? "Add an image, a name and a symbol" : plan && !plan.ok ? "Fix the cost card first" : short ? `Not enough ${chain.symbol}: send ${(plan!.total - mainBalance!).toFixed(DEC)} more` : null
 
   /** A launch is running or just ran: the log takes the top of the panel, the cost folds away. */
   const active = !!launchId || events.length > 0 || busy === "launch"
@@ -559,13 +581,40 @@ export default function LaunchPage() {
         {/* ── 2. the coin ── */}
         <Card className="gap-3">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="flex items-center gap-1.5 text-[15px] font-semibold">Your coin <span className="text-muted-foreground inline-flex items-center gap-1 text-xs font-normal">· on <BrandIcon src={chain.launchpadLogo} label={chain.launchpad} size={13} />{chain.launchpad}</span></h2>
+            <h2 className="flex items-center gap-1.5 text-[15px] font-semibold">Your coin <span className="text-muted-foreground inline-flex items-center gap-1 text-xs font-normal">· on <BrandIcon src={pad.logo} label={pad.name} size={13} />{pad.name}</span></h2>
             <span className="inline-flex items-center gap-1.5">
               <Button size="sm" onClick={() => setAiOpen(true)} disabled={!!busy || launching} className="bg-brand hover:bg-brand/90 text-background"><Sparkles className="size-3.5" />Create with AI</Button>
               <Button size="sm" variant="outline" onClick={loadLast} disabled={!last || !!busy || launching} title={last ? `${last.f.name || "Untitled"}${last.f.symbol ? ` (${last.f.symbol})` : ""} · launched ${new Date(last.savedAt).toLocaleString()}` : "No launch yet: the settings of your next launch are saved for this button"}>Load last launch</Button>
               <Button size="sm" variant="outline" onClick={() => void autofill()} disabled={!!busy || launching}>{busy === "autofill" ? "Filling…" : "Fill with an example"}</Button>
             </span>
           </div>
+          {chain.launchpads.length > 1 ? (
+            <div className="flex flex-col gap-2 rounded-lg border p-2.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-muted-foreground mr-1 inline-flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase">Launchpad <Q k="launchpad" /></span>
+                {chain.launchpads.map((p) => (
+                  <button key={p.id} type="button" disabled={!!p.disabled || launching} title={p.disabled ?? p.note} onClick={() => pickPad(p.id)}
+                    className={cn("inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors", p.id === pad.id ? "border-brand bg-brand/10 text-foreground font-medium" : "hover:bg-accent", p.disabled && "cursor-not-allowed opacity-45")}>
+                    <BrandIcon src={p.logo} label={p.name} size={14} />{p.name}
+                  </button>
+                ))}
+              </div>
+              <p className="text-muted-foreground text-xs leading-snug">{pad.note}</p>
+              {pad.settings?.length ? (
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                  {pad.settings.map((st) => (
+                    <div key={st.field} className="inline-flex items-center gap-1.5 text-xs" title={st.help}>
+                      <span className="font-medium">{st.label}</span>
+                      {st.kind === "toggle" ? <Toggle checked={padVals[st.field] === true} onChange={(v) => setPadVals((x) => ({ ...x, [st.field]: v }))} label={<span className="text-muted-foreground">{padVals[st.field] === true ? "on" : "off"}</span>} />
+                        : st.kind === "select" ? <Select className="h-7 w-auto text-xs" value={String(padVals[st.field] ?? st.default)} onChange={(e) => setPadVals((x) => ({ ...x, [st.field]: e.target.value }))}>{st.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</Select>
+                          : <><Input inputMode="decimal" className="h-7 w-14 font-mono text-xs" value={String(padVals[st.field] ?? "")} onChange={(e) => setPadVals((x) => ({ ...x, [st.field]: e.target.value }))} aria-label={st.label} />{st.unit ? <span className="text-muted-foreground">{st.unit}</span> : null}</>}
+                      {st.help ? <span className="text-muted-foreground hidden lg:inline">{st.help}</span> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
             <div className="flex shrink-0 flex-col items-start gap-1.5 sm:items-center">
             <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs font-medium tracking-wide uppercase">Image</span>
@@ -595,18 +644,18 @@ export default function LaunchPage() {
           </div>
 
           {/* the coin's own options: part of its info, folded until asked for (only on chains that have any) */}
-          {HAS_COIN_OPTIONS ? (<>
+          {hasCoinOptions ? (<>
           <button type="button" className="text-muted-foreground hover:text-foreground -mx-1 flex items-center justify-between gap-3 rounded-md border-t px-1 pt-3 text-left text-xs" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
             <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
               <span className="text-foreground inline-flex items-center gap-1.5 text-sm font-medium"><SlidersHorizontal className="size-3.5" /> More coin options</span>
-              <span className="truncate">{`${custom ? `paired with ${sym}` : `paired with ${chain.symbol}`}${chain.vanitySuffix ? ` · ${mintMode === "vanity" ? `address ends in …${chain.vanitySuffix}` : "random address"}` : ""}${mayhem && mayhemAllowed ? " · Mayhem" : ""}${holderReward ? " · holder rewards" : ""}${feeAllowed && f.creatorFeeBps ? ` · creator fee ${f.creatorFeeBps} bps` : ""}`}</span>
+              <span className="truncate">{`${custom ? `paired with ${sym}` : `paired with ${chain.symbol}`}${feat.vanitySuffix ? ` · ${mintMode === "vanity" ? `address ends in …${feat.vanitySuffix}` : "random address"}` : ""}${mayhem && mayhemAllowed ? " · Mayhem" : ""}${holderReward ? " · holder rewards" : ""}${feeAllowed && f.creatorFeeBps ? ` · creator fee ${f.creatorFeeBps} bps` : ""}`}</span>
             </span>
             <span className="shrink-0 text-base">{advanced ? "▴" : "▾"}</span>
           </button>
           {advanced ? (
             <div className="flex flex-col gap-3">
               <div className="grid gap-3 sm:grid-cols-2">
-{chain.features.pairs ? (
+{feat.pairs ? (
                 <Field label={<span className="inline-flex items-center gap-1.5">Pair with <Q k="pair" /></span>} hint={custom ? `buys are paid in ${sym}; every wallet must hold it. Fees stay in ${chain.symbol}.` : `${chain.symbol}: the ordinary ${chain.launchpad} coin`}>
                   <Select value={quoteMint} onChange={(e) => setQuoteMint(e.target.value)}>
                     <option value={SOL_PAIR.mint}>{chain.symbol} · {chain.name}</option>
@@ -614,13 +663,13 @@ export default function LaunchPage() {
                   </Select>
                 </Field>
 ) : null}
-                {feeAllowed ? <Field label={<span className="inline-flex items-center gap-1.5">Creator fee (bps) <Q k="creatorFee" /></span>} hint={`100 = 1 %; empty = ${chain.launchpad}'s schedule`}><Input inputMode="numeric" placeholder="e.g. 50" value={f.creatorFeeBps} onChange={set("creatorFeeBps")} /></Field> : null}
+                {feeAllowed ? <Field label={<span className="inline-flex items-center gap-1.5">Creator fee (bps) <Q k="creatorFee" /></span>} hint={`100 = 1 %; empty = ${pad.name}'s schedule`}><Input inputMode="numeric" placeholder="e.g. 50" value={f.creatorFeeBps} onChange={set("creatorFeeBps")} /></Field> : null}
               </div>
-{chain.vanitySuffix ? (
+{feat.vanitySuffix ? (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex w-full shrink-0 items-center gap-1.5 text-sm sm:w-32">Coin address <Q k="mintAddress" /></span>
                 <Chip active={mintMode === "random"} onClick={() => setMintMode("random")}>Random</Chip>
-                <Chip active={mintMode === "vanity"} onClick={() => setMintMode("vanity")}>Ends in …{chain.vanitySuffix}</Chip>
+                <Chip active={mintMode === "vanity"} onClick={() => setMintMode("vanity")}>Ends in …{feat.vanitySuffix}</Chip>
                 {mintMode === "vanity" ? (
                   <span className="flex flex-wrap items-center gap-3 text-xs">
                     <span className={pool.available > 0 ? "text-ok font-semibold" : "text-destructive font-semibold"}>{pool.available} ready</span>
@@ -633,10 +682,10 @@ export default function LaunchPage() {
               </div>
 ) : null}
               <div className="flex flex-wrap gap-x-6 gap-y-2">
-{chain.features.mayhem ? (
+{feat.mayhem ? (
                 <Toggle checked={mayhem && mayhemAllowed} onChange={(v) => mayhemAllowed && setMayhem(v)} label={<span className={`inline-flex items-center gap-1.5 ${mayhemAllowed ? "" : "opacity-60"}`}>Mayhem mode{mayhemAllowed ? "" : " (SOL / USDC pairs only)"} <Q k="mayhem" /></span>} />
 ) : null}
-{chain.features.holderRewards ? (
+{feat.holderRewards ? (
                 <Toggle checked={holderReward} onChange={setHolderReward} label={<span className="inline-flex items-center gap-1.5">Holder rewards <Q k="holderReward" /></span>} />
 ) : null}
               </div>
@@ -676,7 +725,7 @@ export default function LaunchPage() {
                 <Line label="How many">
                   {BUNDLE_COUNTS.filter((c) => c > 0).map((c) => <Chip key={c} active={bundle.length === c} onClick={() => setBundle(resize(bundle, c, bundleEach))}>{c}</Chip>)}
                 </Line>
-{chain.features.sameBlock ? (
+{feat.sameBlock ? (
                 <Line label="When" help="bundleWhen" alert={!useJito}>
                   <Chip active={useJito} onClick={() => setUseJito(true)}>Same block</Chip>
                   <Chip active={!useJito} onClick={() => setUseJito(false)}>Right after</Chip>
@@ -875,7 +924,7 @@ export default function LaunchPage() {
                   ...(cost.volume > 0 ? [{ key: "volume", node: <CostLine label="Volume maker budget" value={cost.volume} /> }] : []),
                   ...(cost.fee > 0 ? [{ key: "fee", node: <CostLine muted label={`API fee (${+(API_FEE_RATE * 100).toFixed(2)} % of each buy)`} value={cost.fee} note={plan.custom ? `kept in ${chain.symbol} for the fee on each buy` : undefined} /> }] : []),
                   { key: "buffer", node: <CostLine muted label={`Gas buffer (${GAS_BUFFER} × ${cost.wallets} wallet${cost.wallets === 1 ? "" : "s"}, mostly comes back)`} value={cost.buffer} /> },
-                  ...(cost.create > 0 ? [{ key: "create", node: <CostLine muted label={`Creating the coin (${chain.createCostNote})`} value={cost.create} /> }] : []),
+                  ...(cost.create > 0 ? [{ key: "create", node: <CostLine muted label={`Creating the coin (${feat.createCostNote})`} value={cost.create} /> }] : []),
                   ...(cost.tip > 0 ? [{ key: "tip", node: <CostLine muted label={chain.tipName ?? "Tip"} value={cost.tip} /> }] : []),
                   ...(cost.lut > 0 ? [{ key: "lut", node: <CostLine muted label="Lookup table rent (refunded)" value={cost.lut} /> }] : []),
                 ]} />

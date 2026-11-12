@@ -149,7 +149,7 @@ export class Trenchy {
     account: async (wallet: string): Promise<AccountData> => {
       const a = await this.get<AccountData & Record<string, string | number>>(`${this.base}/account?wallet=${wallet}`)
       // every chain under one shape: the balance under its own name, and gas as EIP-1559 fields (a gasPrice-only chain: both = gasPrice)
-      return { ...a, balanceEth: String(a.balanceEth ?? a.balanceBnb ?? a.balanceHype ?? a.balance ?? "0"), maxFeePerGas: String(a.maxFeePerGas ?? a.gasPrice), maxPriorityFeePerGas: String(a.maxPriorityFeePerGas ?? (a.maxFeePerGas ? "0" : a.gasPrice)), transferGas: String(a.transferGas ?? "21000") }
+      return { ...a, balanceEth: String(a.balanceEth ?? a.balanceBnb ?? a.balanceHype ?? a.balanceUsdc ?? a.balance ?? "0"), maxFeePerGas: String(a.maxFeePerGas ?? a.gasPrice), maxPriorityFeePerGas: String(a.maxPriorityFeePerGas ?? (a.maxFeePerGas ? "0" : a.gasPrice)), transferGas: String(a.transferGas ?? "21000") }
     },
 
     /** POST /api/<chain>/trade-local: the ordered unsigned transactions for a buy, sell or create ([approve?] trade [fee]; create → + predicted.token). */
@@ -173,6 +173,9 @@ export class Trenchy {
      * poll, not 20. An API without /txs gets GET /api/<chain>/tx/:hash one by one instead.
      */
     tx: (hash: string) => this.txStatus(hash),
+
+    /** GET /api/<chain>/created?hash=: the coin a create transaction made (read from its receipt). */
+    created: (hash: string) => this.get<{ hash: string; status: string; token: string | null; block?: number }>(`${this.base}/created?hash=${hash}`),
 
     /** GET /api/<chain>/pnl?token=&wallets=&since=: the ETH profit or loss of up to 100 wallets on the coin. */
     pnl: (token: string, wallets: string[], since?: number) => this.get<CoinPnl>(`${this.base}/pnl?token=${token}&wallets=${wallets.join(",")}${since ? `&since=${since}` : ""}`),
@@ -202,13 +205,13 @@ export class Trenchy {
 
     /** GET /api/<chain>/quote?token&action&amount[&wallet]: the exact numbers before a trade (snipe tax depends on the wallet). */
     quote: (p: { token: string; action: "buy" | "sell"; amount: number; wallet?: string }) =>
-      this.get<Quote>(`${this.base}/quote?token=${p.token}&action=${p.action}&amount=${p.amount}${p.wallet ? `&wallet=${p.wallet}` : ""}`).then((q) => ({ ...q, ethOut: (q.ethOut ?? q.bnbOut ?? q.hypeOut) as number | undefined, ethIn: (q.ethIn ?? q.bnbIn ?? q.hypeIn) as number | undefined })),
+      this.get<Quote>(`${this.base}/quote?token=${p.token}&action=${p.action}&amount=${p.amount}${p.wallet ? `&wallet=${p.wallet}` : ""}`).then((q) => ({ ...q, ethOut: (q.ethOut ?? q.bnbOut ?? q.hypeOut ?? q.usdcOut) as number | undefined, ethIn: (q.ethIn ?? q.bnbIn ?? q.hypeIn ?? q.usdcIn) as number | undefined })),
 
     /** GET /api/<chain>/token/:token: name, symbol, venue (pons-curve | uniswap-v4), curve state. */
     token: async (token: string): Promise<TokenInfo> => {
       const t = await this.get<TokenInfo & Record<string, unknown>>(`${this.base}/token/${token}`)
       const cs = (t.curveState ?? {}) as Record<string, number>
-      const price = typeof cs.priceEth === "number" ? cs.priceEth : typeof t.priceBnb === "number" ? t.priceBnb : typeof t.priceEth === "number" ? t.priceEth : null
+      const price = typeof cs.priceEth === "number" ? cs.priceEth : typeof t.priceBnb === "number" ? t.priceBnb : typeof t.priceUsdc === "number" ? t.priceUsdc : typeof t.priceEth === "number" ? t.priceEth : null
       return { ...t, venue: (t.venue ?? t.launchpad) as TokenInfo["venue"], graduated: t.graduated === true, creator: String(t.creator ?? t.founder ?? ""), curve: String(t.curve ?? ""), priceNative: price, totalSupply: typeof t.totalSupply === "number" ? t.totalSupply : null }
     },
 
@@ -220,8 +223,8 @@ export class Trenchy {
       const f = await this.get<CreatorFees & Record<string, unknown>>(`${this.base}/creator-fees?wallet=${wallet}${token ? `&token=${token}` : ""}`)
       // pons: escrow eth + the curve's pending · Elysium pads: claimableHype (+ pendingHype) · Flap: the processor's pendingBnb
       const n = (v: unknown) => (typeof v === "number" ? v : 0)
-      const eth = n(f.eth ?? f.claimableHype ?? f.pendingBnb)
-      return { ...f, eth, claimableEth: n(f.claimableEth ?? f.claimableHype ?? f.pendingBnb), curve: f.curve ?? (f.pendingHype ? { token: token ?? "", curve: "", creator: wallet, graduated: false, pendingEth: n(f.pendingHype), sweepable: false } : null) }
+      const eth = n(f.eth ?? f.claimableEth ?? f.claimableHype ?? f.pendingBnb ?? f.claimableUsdc ?? f.claimable)
+      return { ...f, eth, claimableEth: n(f.claimableEth ?? f.claimableHype ?? f.pendingBnb ?? f.claimableUsdc ?? f.claimable), curve: f.curve ?? (f.pendingHype ? { token: token ?? "", curve: "", creator: wallet, graduated: false, pendingEth: n(f.pendingHype), sweepable: false } : null) }
     },
 
     /** GET /api/<chain>/balances?wallets=a,b,…: ETH for up to 100 wallets per call. */
@@ -236,7 +239,7 @@ export class Trenchy {
 
     /** GET /api/<chain>/balances?wallet=&tokens=: ETH + token balances of one wallet. */
     balances: (wallet: string, tokens: string[]) =>
-      this.get<{ wallet: string; eth?: string; bnb?: string; hype?: string; tokens: Array<{ token: string; balance: string }> }>(`${this.base}/balances?wallet=${wallet}${tokens.length ? `&tokens=${tokens.join(",")}` : ""}`).then((r) => ({ ...r, eth: r.eth ?? r.bnb ?? r.hype ?? "0" })),
+      this.get<{ wallet: string; eth?: string; bnb?: string; hype?: string; usdc?: string; tokens: Array<{ token: string; balance: string }> }>(`${this.base}/balances?wallet=${wallet}${tokens.length ? `&tokens=${tokens.join(",")}` : ""}`).then((r) => ({ ...r, eth: r.eth ?? r.bnb ?? r.hype ?? r.usdc ?? "0" })),
   }
 
   private txStatus(hash: string): Promise<TxStatus> {

@@ -3,7 +3,9 @@
 
 <p align="center"><a href="https://pons.trenchy.tools"><b>Live demo</b></a> · <a href="https://trenchy.tools/docs">Docs</a> · <a href="https://api.trenchy.tools/api/create-api-key">Get an API key</a> · <a href="https://api.trenchy.tools/AGENTS.md">AGENTS.md</a> · <a href="https://api.trenchy.tools/openapi.json">OpenAPI</a> · <a href="https://trenchy.tools/status">Status</a> · <a href="https://t.me/trenchytools">Telegram</a> · <a href="https://x.com/trenchytools">X</a></p>
 
-# pons starter
+# Robinhood launcher
+
+**Launchpads**, picked on the Launch page: **pons** (curve → Uniswap v4, your buyers on the snipe-tax exempt list), **pools.trade**, **circus**, **Sushi** and **pools.fun**. Trading works on any of them: the API finds every coin's market.
 
 The official starter for launching on **pons** (Robinhood Chain, chain id 4663, native ETH) with the
 [TrenchyTools API](https://api.trenchy.tools/AGENTS.md). One Next.js app, one process, one `npm run dev`.

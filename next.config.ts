@@ -11,7 +11,7 @@ const CSP = [
   "default-src 'self'",
   "connect-src 'self' https://api.trenchy.tools wss://api.trenchy.tools",
   "img-src 'self' data: blob: https:",
-  "script-src 'self' 'unsafe-inline'",
+  `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : ""}`, // next dev only: React's dev build needs eval()
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "object-src 'none'",

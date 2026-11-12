@@ -89,7 +89,7 @@ export function WalletPicker({ title, hint, wallets, balances, mainWallet, exclu
           return (
             <label key={w.publicKey} className={`flex items-center gap-2 border-b px-2 py-1 text-sm last:border-0 ${on ? "bg-muted/60" : "hover:bg-muted/30"} ${excluded ? "opacity-40" : ""}`}>
               <Checkbox checked={on} disabled={disabled || excluded || (!on && full)} onChange={() => toggle(w.publicKey)} />
-              <span className="w-5 text-center text-xs">{w.publicKey === mainWallet ? "★" : ""}</span>
+              <span className="w-5 text-center text-xs">{w.publicKey === mainWallet ? "dev" : ""}</span>
               <span className="min-w-0 flex-1 truncate">{w.label}</span>
               <Mono className="text-muted-foreground hidden text-xs sm:inline">{chain.short(w.publicKey)}</Mono>
               <span className="w-28 text-right font-mono text-xs">{chain.fmt(balances.get(w.publicKey))} {chain.symbol}</span>

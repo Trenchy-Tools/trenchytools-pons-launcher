@@ -106,7 +106,7 @@ export function materialize(env: Env, f: LaunchForm): LaunchForm {
 }
 
 /** A "new wallet" row before the launch creates it: a placeholder in the plan (no address, nothing held). */
-const placeholder = (role: "bundle" | "sniper" | "holder", i: number): WalletInfo => ({ publicKey: "", chain: CHAIN, role, label: `${role} ${i + 1} (new)`, createdAt: "", app: "", file: "" })
+const placeholder = (role: "bundle" | "sniper" | "holder", i: number): WalletInfo => ({ publicKey: "", chain: CHAIN, role, label: `${role === "bundle" ? "buyer" : role === "holder" ? "later buyer" : role} ${i + 1} (new)`, createdAt: "", app: "", file: "" })
 
 export const metadataOf = (f: LaunchForm): TokenMetadata => ({ name: f.name, symbol: f.symbol, image: f.image, description: f.description, twitter: f.twitter, telegram: f.telegram, website: f.website })
 
@@ -143,7 +143,7 @@ const amounts = (ws: Picked[]): string => {
 /** The wallets a launch uses: the explicit buyers, or (old form shape) wallets by role, created on the spot when a role has too few. */
 export function resolveWallets(env: Env, f: LaunchForm): Resolved {
   const dev = f.devWallet ? env.wallets.get(f.devWallet) : env.wallets.main()
-  if (!dev) throw new AppError(f.devWallet ? `No wallet ${f.devWallet} ${where(env.wallets)}` : "No ★ wallet yet: create or import one on the Wallets page", "no_funding_wallet", 400)
+  if (!dev) throw new AppError(f.devWallet ? `No wallet ${f.devWallet} ${where(env.wallets)}` : "No dev wallet yet: create one at the top of the Launch or Wallets page", "no_funding_wallet", 400)
   const bundle = pick(env, "bundle", f.bundle)
   const snipers = pick(env, "sniper", f.snipers)
   const holders = pick(env, "holder", f.holders)
@@ -190,7 +190,7 @@ export async function fundPlan(env: Env, f: LaunchForm): Promise<{ from: string;
 async function checkDevBalance(env: Env, f: LaunchForm, r: Resolved): Promise<void> {
   const row = fundingPlan(f, r).rows[0]
   const acct = await env.api.rh.account(r.dev.publicKey) // GET /api/rh/account: balanceEth
-  if (Number(acct.balanceEth) < row.needEth) throw new AppError(`Dev wallet ${r.dev.publicKey} holds ${acct.balanceEth} ETH; the create needs about ${row.needEth.toFixed(5)} ETH (dev buy + pons launch fee + API fee + gas). Nothing was sent.`, "insufficient_funds", 409, "Fund it from the ★ wallet (Funding plan → Fund) or send ETH to it")
+  if (Number(acct.balanceEth) < row.needEth) throw new AppError(`Dev wallet ${r.dev.publicKey} holds ${acct.balanceEth} ETH; the create needs about ${row.needEth.toFixed(5)} ETH (dev buy + pons launch fee + API fee + gas). Nothing was sent.`, "insufficient_funds", 409, "Fund it from the dev wallet (Funding plan → Fund) or send ETH to it")
 }
 
 export type SimulateResult = { predicted?: Built["predicted"]; launchFeeEth?: number; expected: Built["expected"]; simulation: Simulation; exempt: number; warnings: string[] }
@@ -234,13 +234,13 @@ export async function execute(env: Env, record: LaunchRecord, f: LaunchForm, log
     let plan = await planWithBalances(env, f)
     let short = plan.rows.filter((x) => (x.shortEth ?? 0) > 0)
     if (short.length && f.fundFirst !== false) {
-      log("fund", `${short.length} wallet(s) short of ETH (${plan.shortEth?.toFixed(5)} ETH in total): funding them from the ★ wallet…`)
+      log("fund", `${short.length} wallet(s) short of ETH (${plan.shortEth?.toFixed(5)} ETH in total): funding them from the dev wallet…`)
       const funded = await fundPlan(env, f)
       for (const x of funded.results) log("fund", x.error ? `${x.publicKey}: ${x.error}` : `${x.publicKey} +${x.eth} ETH${x.confirmed ? "" : " (not confirmed yet)"}`, { hash: x.hash, link: x.hash ? txLink(x.hash) : undefined, level: x.error ? "error" : "ok" })
       plan = await planWithBalances(env, f)
       short = plan.rows.filter((x) => (x.shortEth ?? 0) > 0)
     }
-    if (short.length) throw new AppError(`${short.length} wallet(s) are short of ETH (total ${plan.shortEth?.toFixed(5)} ETH): ${short.map((x) => `${x.label} needs ${x.needEth.toFixed(5)}, has ${(x.haveEth ?? 0).toFixed(5)}`).join("; ")}. Nothing was sent.`, "insufficient_funds", 409, "Send ETH to the ★ wallet, then launch again")
+    if (short.length) throw new AppError(`${short.length} wallet(s) are short of ETH (total ${plan.shortEth?.toFixed(5)} ETH): ${short.map((x) => `${x.label} needs ${x.needEth.toFixed(5)}, has ${(x.haveEth ?? 0).toFixed(5)}`).join("; ")}. Nothing was sent.`, "insufficient_funds", 409, "Send ETH to the dev wallet, then launch again")
     log("prepare", "Every wallet holds what the plan asks for", { level: "ok" })
 
     // 3. the create: POST /api/rh/trade-local { action: "create" } → create + fee, predicted.token

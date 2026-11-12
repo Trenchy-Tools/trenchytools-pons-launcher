@@ -21,7 +21,7 @@ export type FundResult = { publicKey: string; eth: number; hash?: string; confir
 
 function requireFunding(env: Env): WalletInfo {
   const f = env.wallets.main()
-  if (!f) throw new AppError("No ★ wallet yet: create or import one on the Wallets page first", "no_funding_wallet", 400)
+  if (!f) throw new AppError("No dev wallet yet: create one at the top of the Launch or Wallets page first", "no_funding_wallet", 400)
   env.wallets.assertBackedUp(f.publicKey)
   return f
 }

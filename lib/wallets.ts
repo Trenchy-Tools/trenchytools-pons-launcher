@@ -308,7 +308,7 @@ export function archiveWallets(publicKeys: string[]): { archived: string[]; dir:
   fs.mkdirSync(ARCHIVE_DIR, { recursive: true })
   const archived: string[] = []
   for (const pk of publicKeys) {
-    if (main && same(pk, main.publicKey)) throw new Error("The ★ wallet cannot be archived; star another wallet first")
+    if (main && same(pk, main.publicKey)) throw new Error("The dev wallet cannot be removed; make another wallet the dev wallet first")
     const file = findFile(pk)
     if (!file) continue
     fs.renameSync(file, path.join(ARCHIVE_DIR, path.basename(file)))

@@ -148,7 +148,7 @@ export function createKeystore(o: { prefix: string; chain: string; app: string; 
     const a = archivedMap()
     const done: string[] = []
     for (const pk of publicKeys) {
-      if (m && pk === m) throw new Error("The ★ wallet cannot be archived; star another wallet first")
+      if (m && pk === m) throw new Error("The dev wallet cannot be removed; make another wallet the dev wallet first")
       if (!record(pk) || a[pk]) continue
       a[pk] = new Date().toISOString()
       done.push(pk)

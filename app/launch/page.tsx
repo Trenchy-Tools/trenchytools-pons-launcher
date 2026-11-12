@@ -1,21 +1,22 @@
 "use client"
 
 /**
- * Launch on pons, the short way: fill the coin in, pick how many wallets buy with it, press Launch.
+ * Launch on pons, top to bottom like a form:
  *
- *   1. the image goes to IPFS by itself when you press Launch (POST /api/launch/image → POST /api/ipfs; no upload button)
- *   2. every "new wallet" row is created (and backed up) right before the launch (POST /api/wallets)
- *   3. POST /api/launch; the ★ wallet tops short buyers up, the create goes out, the log streams in, and the moment the
- *      coin is live the Trading page opens on it
+ *   1. DEV WALLET card: the wallet that creates the coin and pays (create / import / switch it right here)
+ *   2. Coin: image, name, symbol, description, links
+ *   3. Buys: dev buy · how many buyer wallets · one amount each (per-wallet amounts only if you ask for them)
+ *   4. [Launch · total] — the image goes to IPFS, new buyer wallets are made and topped up by the dev wallet, the create
+ *      goes out, and the Trading page opens on the coin the moment it is live
  *
- * Everything else (dev wallet, slippage, snipers, funding) sits under Advanced. There is no mint card: on pons the
- * address is derived from the whole form (the log shows it before the create is signed).
+ * Slippage and funding sit under Advanced. There is no mint card: on pons the address is derived from the whole form.
  */
 import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { ImagePlus, SlidersHorizontal } from "lucide-react"
 import { ApiCalls, type ApiCall } from "@/components/api-calls"
+import { DevWalletCard } from "@/components/dev-wallet-card"
 import { FailureBox } from "@/components/failure"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -61,7 +62,11 @@ export default function LaunchPage() {
   const [wallets, setWallets] = React.useState<Wallet[]>([])
   const [balances, setBalances] = React.useState<Map<string, number>>(new Map())
   const [main, setMain] = React.useState<string | null>(null)
-  const [devWallet, setDevWallet] = React.useState("")
+  /** The dev wallet is the one on the card at the top; the form never overrides it. */
+  const devWallet = ""
+  const [perWallet, setPerWallet] = React.useState(false)
+  const [bundleEach, setBundleEach] = React.useState("0.001")
+  const [showHolders, setShowHolders] = React.useState(false)
   const [bundle, setBundle] = React.useState<Row[]>(resize([], 2, "0.001"))
   const [holders, setHolders] = React.useState<Row[]>([])
   const [snipers, setSnipers] = React.useState<Row[]>([])
@@ -175,7 +180,7 @@ export default function LaunchPage() {
     const blob = await fetch("/demo-logo.png").then((r) => r.blob())
     setImage(new File([blob], "trenchy-tools.png", { type: "image/png" }))
     setF((s) => ({ ...s, name: "trenchy.tools", symbol: "TRENCHY", description: "The easiest API to launch and trade with. One key, every launchpad, unsigned transactions you sign yourself.", twitter: "https://x.com/trenchytools", telegram: "https://t.me/trenchytools", website: "https://trenchy.tools", devBuyEth: "0.001" }))
-    setBundle(resize([], 2, "0.001")); setHolders([]); setSnipers([])
+    setBundle(resize([], 2, "0.001")); setBundleEach("0.001"); setHolders([]); setShowHolders(false); setSnipers([])
   })
 
   const simulate = () => run("simulate", async () => {
@@ -187,11 +192,11 @@ export default function LaunchPage() {
   const ready = !!f.name && !!f.symbol && !!image
   const devBuyTooSmall = n(f.devBuyEth) > 0 && n(f.devBuyEth) < 0.0001
   const short = fundFirst && plan !== null && (plan.shortEth ?? 0) > 0 && mainBalance !== undefined && mainBalance < (plan.shortEth ?? 0)
-  const blocker = !main ? "Create a ★ wallet first (Wallets)" : !ready ? "Name, symbol and an image are needed" : devBuyTooSmall ? "Dev buy: at least 0.0001 ETH (or 0)" : short ? `Not enough ETH (short ${eth(plan!.shortEth)}, ★ has ${eth(mainBalance)})` : null
+  const blocker = !main ? "Create the dev wallet first (top of the page)" : !ready ? "Add an image, a name and a symbol" : devBuyTooSmall ? "Dev buy: at least 0.0001 ETH (or 0)" : short ? `Send ${eth((plan!.shortEth ?? 0) - (mainBalance ?? 0))} more ETH to the dev wallet` : null
 
   const launch = () => run("launch", async () => {
     if (blocker) throw { error: blocker }
-    if (!confirm(`Launch ${f.name} (${f.symbol}) with ${buyers} buyer wallet${buyers === 1 ? "" : "s"}? About ${plan ? eth(plan.totalEth) : "…"} ETH in total${plan?.shortEth ? `, ${eth(plan.shortEth)} ETH of it from the ★ wallet` : ""}. This sends real transactions.`)) return
+    if (!confirm(`Launch ${f.name} (${f.symbol}) with ${buyers} buyer wallet${buyers === 1 ? "" : "s"}? About ${plan ? eth(plan.totalEth) : "…"} ETH in total${plan?.shortEth ? `, ${eth(plan.shortEth)} ETH of it from the dev wallet` : ""}. This sends real transactions.`)) return
     setLog([]); setDone(null); setSim(null)
     note("ipfs", "Uploading the image to IPFS…")
     const img = await uploadImage()
@@ -229,15 +234,18 @@ export default function LaunchPage() {
     <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
       <div className="flex flex-col gap-5">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Launch on pons</h1>
-          <p className="text-muted-foreground text-sm">One create on Robinhood Chain; the moment it confirms, your bundle wallets buy at once. The image uploads by itself; when the coin is live, Trading opens on it.</p>
+          <h1 className="text-xl font-semibold tracking-tight">Launch a coin on pons</h1>
+          <p className="text-muted-foreground text-sm">Three steps: your dev wallet, your coin, how many wallets buy it. Then press Launch.</p>
         </div>
 
-        {/* ── the coin ── */}
+        {/* ── 1. the dev wallet ── */}
+        <DevWalletCard need={plan ? plan.shortEth ?? 0 : undefined} onChanged={() => void loadWallets().catch(() => {})} />
+
+        {/* ── 2. the coin ── */}
         <Card className="gap-3">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-[15px] font-semibold">Coin</h2>
-            <Button size="sm" variant="outline" onClick={() => void autofill()} disabled={!!busy || launching} title="Fills every field with the trenchy.tools coin and loads our logo; default launch numbers">{busy === "autofill" ? "Filling…" : "Auto-fill demo data"}</Button>
+            <h2 className="text-[15px] font-semibold">Your coin</h2>
+            <Button size="sm" variant="outline" onClick={() => void autofill()} disabled={!!busy || launching} title="Fills every field with the trenchy.tools coin and our logo">{busy === "autofill" ? "Filling…" : "Fill with an example"}</Button>
           </div>
           <div className="flex items-start gap-4">
             <button
@@ -246,69 +254,74 @@ export default function LaunchPage() {
               onDragOver={(e) => { e.preventDefault(); setDragOver(true) }} onDragLeave={() => setDragOver(false)}
               onDrop={(e) => { e.preventDefault(); setDragOver(false); const file = e.dataTransfer.files?.[0]; if (file) setImage(file) }}
               className={`flex size-24 shrink-0 items-center justify-center overflow-hidden rounded-xl border-2 border-dashed transition-colors ${dragOver ? "border-foreground bg-accent" : "hover:border-foreground/60"}`}
-              title="Click or drop an image (png, jpg, gif, webp, up to 4 MB). It is uploaded to IPFS when you launch."
+              title="Click or drop an image (png, jpg, gif, webp, up to 4 MB)"
             >
-              {preview ? <img src={preview} alt="" className="size-full object-cover" /> : <span className="text-muted-foreground flex flex-col items-center gap-1 text-[11px]"><ImagePlus className="size-5" />image</span>}
+              {preview ? <img src={preview} alt="" className="size-full object-cover" /> : <span className="text-muted-foreground flex flex-col items-center gap-1 text-[11px]"><ImagePlus className="size-5" />add image</span>}
               <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="hidden" onChange={(e) => setImage(e.target.files?.[0] ?? null)} />
             </button>
             <div className="grid flex-1 gap-3 sm:grid-cols-2">
               <Field label="Name"><Input maxLength={32} placeholder="My Coin" value={f.name} onChange={set("name")} /></Field>
               <Field label="Symbol"><Input maxLength={10} placeholder="COIN" value={f.symbol} onChange={(e) => setF((s) => ({ ...s, symbol: e.target.value.toUpperCase() }))} /></Field>
-              <Field label="Description" className="sm:col-span-2"><Textarea className="min-h-14" placeholder="What is it?" value={f.description} onChange={set("description")} /></Field>
+              <Field label="Description (optional)" className="sm:col-span-2"><Textarea className="min-h-14" placeholder="What is it?" value={f.description} onChange={set("description")} /></Field>
             </div>
           </div>
           <div className="grid gap-2 sm:grid-cols-3">
-            <Input className="text-xs" placeholder="Twitter / X URL" value={f.twitter} onChange={set("twitter")} />
-            <Input className="text-xs" placeholder="Telegram URL" value={f.telegram} onChange={set("telegram")} />
-            <Input className="text-xs" placeholder="Website URL" value={f.website} onChange={set("website")} />
+            <Input className="text-xs" placeholder="X / Twitter link (optional)" value={f.twitter} onChange={set("twitter")} />
+            <Input className="text-xs" placeholder="Telegram link (optional)" value={f.telegram} onChange={set("telegram")} />
+            <Input className="text-xs" placeholder="Website (optional)" value={f.website} onChange={set("website")} />
           </div>
         </Card>
 
-        {/* ── the buys ── */}
+        {/* ── 3. the buys ── */}
         <Card className="gap-4">
-          <h2 className="text-[15px] font-semibold">Buys</h2>
+          <h2 className="text-[15px] font-semibold">Who buys at launch</h2>
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">Dev buy</span>
+            <span className="w-32 text-sm font-medium">Dev wallet buys</span>
             <Input inputMode="decimal" className="h-8 w-24 font-mono text-xs" value={f.devBuyEth} onChange={set("devBuyEth")} aria-label="Dev buy" />
             <span className="text-muted-foreground text-xs">ETH</span>
             {DEV_CHIPS.map((v) => <Chip key={v} active={f.devBuyEth === v} onClick={() => setF((s) => ({ ...s, devBuyEth: v }))}>{v}</Chip>)}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">Dev wallet</span>
-            {wallets.length ? (
-              <>
-                <Select className="h-8 max-w-sm flex-1 text-xs" value={devWallet} onChange={(e) => setDevWallet(e.target.value)} aria-label="Dev wallet">
-                  {[...wallets].sort((a, b) => (a.publicKey === main ? -1 : b.publicKey === main ? 1 : 0)).map((w) => <option key={w.publicKey} value={w.publicKey === main ? "" : w.publicKey}>{w.publicKey === main ? "★ " : ""}{w.label} · {chain.short(w.publicKey)} · {chain.fmt(balances.get(w.publicKey))} ETH</option>)}
-                </Select>
-                <span className="text-muted-foreground text-xs">creates the coin and pays for everything</span>
-              </>
-            ) : (
-              <span className="text-warn text-xs">No wallets yet. <Link href="/wallets" className="underline underline-offset-4">Create or import one on the Wallets page</Link>; the first one becomes ★ and is the dev wallet.</span>
-            )}
+            <span className="w-32 text-sm font-medium">Buyer wallets</span>
+            <div className="flex flex-wrap gap-1">{BUNDLE_COUNTS.map((c) => <Chip key={c} active={bundle.length === c} onClick={() => setBundle(resize(bundle, c, bundleEach))}>{c}</Chip>)}</div>
           </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="flex flex-col gap-2 rounded-lg border p-3">
-              <div className="text-ok text-[11px] font-semibold tracking-wide uppercase">Bundle buyers</div>
-              <p className="text-muted-foreground text-xs">Buy all at once the moment the create confirms (up to 16). Every buyer is on the snipe-tax exempt list.</p>
-              <div className="flex flex-wrap gap-1">{BUNDLE_COUNTS.map((c) => <Chip key={c} active={bundle.length === c} onClick={() => setBundle(resize(bundle, c, "0.001"))}>{c}</Chip>)}</div>
-              <Rows rows={bundle} onChange={setBundle} prefix="B" />
+          {bundle.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-32 text-sm font-medium">Each one buys</span>
+              {perWallet ? <span className="text-muted-foreground text-xs">set per wallet below</span> : (
+                <>
+                  <Input inputMode="decimal" className="h-8 w-24 font-mono text-xs" value={bundleEach} onChange={(e) => { setBundleEach(e.target.value); setBundle(bundle.map((r) => ({ ...r, amount: e.target.value }))) }} aria-label="Each buyer buys" />
+                  <span className="text-muted-foreground text-xs">ETH</span>
+                  {ALL_CHIPS.map((v) => <Chip key={v} active={bundleEach === v} onClick={() => { setBundleEach(v); setBundle(bundle.map((r) => ({ ...r, amount: v }))) }}>{v}</Chip>)}
+                </>
+              )}
+              <button type="button" className="text-muted-foreground hover:text-foreground ml-auto text-xs underline underline-offset-4" onClick={() => setPerWallet((v) => !v)}>{perWallet ? "same amount for all" : "different amounts / pick wallets"}</button>
             </div>
+          ) : null}
+          {bundle.length > 0 && perWallet ? <Rows rows={bundle} onChange={setBundle} prefix="B" /> : null}
+          <p className="text-muted-foreground text-xs">{bundle.length ? `${bundle.length} new wallet${bundle.length === 1 ? " is" : "s are"} made for you, topped up by the dev wallet, and buy${bundle.length === 1 ? "s" : ""} the moment the coin is created (free of the snipe tax).` : "Only the dev wallet buys."}{DEMO && bundle.length ? " Their keys download as a file first." : ""}</p>
+
+          {holders.length || showHolders ? (
             <div className="flex flex-col gap-2 rounded-lg border p-3">
-              <div className="text-warn text-[11px] font-semibold tracking-wide uppercase">Holder wallets (optional)</div>
-              <p className="text-muted-foreground text-xs">Buy after the launch, spread over the holder window after the delay (both in Settings).</p>
-              <div className="flex flex-wrap gap-1">{HOLDER_COUNTS.map((c) => <Chip key={c} active={holders.length === c} onClick={() => setHolders(resize(holders, c, "0.001"))}>{c}</Chip>)}</div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">Buyers after the launch</span>
+                <button type="button" className="text-muted-foreground hover:text-foreground text-xs underline underline-offset-4" onClick={() => { setHolders([]); setShowHolders(false) }}>remove</button>
+              </div>
+              <p className="text-muted-foreground text-xs">They buy one by one a little after the launch (the delay and spread are in Settings).</p>
+              <div className="flex flex-wrap gap-1">{HOLDER_COUNTS.map((c) => <Chip key={c} active={holders.length === c} onClick={() => setHolders(resize(holders, c, bundleEach))}>{c}</Chip>)}</div>
               <Rows rows={holders} onChange={setHolders} prefix="H" />
             </div>
-          </div>
+          ) : (
+            <button type="button" className="text-muted-foreground hover:text-foreground self-start text-xs underline underline-offset-4" onClick={() => { setShowHolders(true); setHolders(resize([], 3, bundleEach)) }}>+ also add wallets that buy a little later (optional)</button>
+          )}
           {buyers > MAX_EXEMPT ? <p className="text-warn text-xs">{buyers} buyers: pons exempts at most {MAX_EXEMPT} from the snipe tax; the rest pay it.</p> : null}
-          <p className="text-muted-foreground text-xs"><span className="text-foreground font-medium">How the buyers get their money:</span> a "new wallet" row is created when you press Launch (its key is saved {DEMO ? "in this browser, the backup downloads itself" : "to the folder"} first), then the ★ wallet sends every buyer its buy + the 0.5 % fee + 0.0005 ETH for gas, and only then the coin is created. So ★ must hold the Cost total on the right. Pick an existing wallet in a row to use one that is already funded.</p>
         </Card>
 
         {/* ── advanced ── */}
-        <Button variant="outline" size="lg" className="h-auto w-full justify-between px-4 py-3 text-left" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
+        <Button variant="ghost" className="h-auto w-full justify-between px-4 py-2.5 text-left" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
           <span className="flex min-w-0 flex-col gap-0.5">
-            <span className="flex items-center gap-2 font-semibold"><SlidersHorizontal className="size-4" /> Advanced options</span>
-            <span className="text-muted-foreground truncate text-xs font-normal">{advanced ? "slippage · funding" : `${fundFirst ? "★ funds the buyers" : "no funding"}${f.slippage ? ` · slippage ${f.slippage} %` : " · slippage from Settings"}`}</span>
+            <span className="flex items-center gap-2 text-sm font-medium"><SlidersHorizontal className="size-4" /> Advanced (optional)</span>
+            <span className="text-muted-foreground truncate text-xs font-normal">{`${fundFirst ? "the dev wallet funds the buyers" : "no funding"}${f.slippage ? ` · slippage ${f.slippage} %` : " · slippage from Settings"}`}</span>
           </span>
           <span className="shrink-0 text-base">{advanced ? "▴" : "▾"}</span>
         </Button>
@@ -317,17 +330,18 @@ export default function LaunchPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Slippage % (blank = Settings)"><Input inputMode="numeric" value={f.slippage} onChange={set("slippage")} /></Field>
             </div>
-            <Toggle checked={fundFirst} onChange={setFundFirst} label="Top short buyers up from ★ before the create (off: refuse when a wallet is short)" />
+            <Toggle checked={fundFirst} onChange={setFundFirst} label="The dev wallet tops short buyers up before the create (off: refuse when a wallet is short)" />
           </Card>
         ) : null}
 
         <FailureBox failure={failure} />
-        <div className="flex gap-3">
-          <Button variant="secondary" size="lg" className="flex-1" onClick={simulate} disabled={!!busy || launching || !main} title="Builds the create against the API and runs it on a copy of the chain. Every API call is listed on the right. Nothing is sent.">{busy === "simulate" ? "Dry run…" : "Dry run · see every API call"}</Button>
-          <Button size="lg" className={`flex-[2] ${short ? "bg-destructive hover:bg-destructive/90 text-white" : ""}`} onClick={launch} disabled={!!busy || launching || !!blocker}>
-            {busy === "launch" ? "Starting…" : launching ? "Launching…" : blocker ?? `Launch (${plan ? eth(plan.totalEth) : "…"} ETH)`}
-          </Button>
-        </div>
+        <Button size="lg" className={`h-12 w-full text-base ${blocker ? "" : "bg-ok hover:bg-ok/90 text-background"}`} onClick={launch} disabled={!!busy || launching || !!blocker}>
+          {busy === "launch" ? "Starting…" : launching ? "Launching…" : blocker ?? `Launch ${f.symbol || "it"} · ${plan ? eth(plan.totalEth) : "…"} ETH`}
+        </Button>
+        <p className="text-muted-foreground -mt-2 flex flex-wrap items-center gap-x-2 text-xs">
+          <button type="button" className="hover:text-foreground underline underline-offset-4" onClick={simulate} disabled={!!busy || launching || !main} title="Builds the launch and runs it on a copy of the chain; every API call shows on the right. Nothing is sent.">{busy === "simulate" ? "Testing…" : "Test it first (nothing is sent)"}</button>
+          {DEMO ? <span>· {TAB_NOTE}</span> : null}
+        </p>
         {DEMO ? <p className="text-muted-foreground -mt-2 text-xs">{TAB_NOTE}</p> : null}
       </div>
 
@@ -345,10 +359,10 @@ export default function LaunchPage() {
                   </div>
                 ))}
                 <div className="mt-1 flex items-baseline justify-between border-t pt-2 font-medium"><span>Total across the wallets</span><Mono>{eth(plan.totalEth)} ETH</Mono></div>
-                <div className="text-muted-foreground flex justify-between text-xs"><span>{fundFirst ? "★ sends at launch (the shortfall)" : "Short (funding is off)"}</span><Mono className={`text-xs ${short ? "text-destructive" : ""}`}>{eth(plan.shortEth ?? 0)} ETH</Mono></div>
+                <div className="text-muted-foreground flex justify-between text-xs"><span>{fundFirst ? "The dev wallet sends at launch" : "Short (funding is off)"}</span><Mono className={`text-xs ${short ? "text-destructive" : ""}`}>{eth(plan.shortEth ?? 0)} ETH</Mono></div>
               </div>
               {plan.warnings.map((w, i) => <p key={i} className="text-warn text-xs">{w}</p>)}
-              <p className="text-muted-foreground text-xs">buy + 0.5 % API fee + 0.0005 ETH gas per wallet, dev + 0.0005 launch fee · {plan.exempt} exempt · ★ holds {mainBalance === undefined ? "…" : `${eth(mainBalance)} ETH`}</p>
+              <p className="text-muted-foreground text-xs">buy + 0.5 % API fee + 0.0005 ETH gas per wallet, dev + 0.0005 launch fee · {plan.exempt} exempt · the dev wallet holds {mainBalance === undefined ? "…" : `${eth(mainBalance)} ETH`}</p>
             </>
           ) : <p className="text-muted-foreground text-sm">…</p>}
         </Card>

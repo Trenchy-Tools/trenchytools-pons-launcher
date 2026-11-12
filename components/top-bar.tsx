@@ -29,7 +29,7 @@ export function TopBar() {
   const connected = status?.status === "connected"
   const rejected = status?.status === "error" || !!failure
   const tone = !status && !failure ? "bg-muted-foreground" : rejected ? "bg-destructive" : connected && status?.funding && !pending ? "bg-ok" : "bg-warn"
-  const text = !status && !failure ? "checking…" : failure ? "app server unreachable" : rejected ? "API key rejected" : !connected ? "no API key yet" : !status?.funding ? "key ok · no ★ wallet yet" : pending ? `${pending} wallet${pending === 1 ? "" : "s"} not backed up` : "key ok · ★ ready"
+  const text = !status && !failure ? "checking…" : failure ? "app server unreachable" : rejected ? "API key rejected" : !connected ? "no API key yet" : !status?.funding ? "key ok · no dev wallet yet" : pending ? `${pending} wallet${pending === 1 ? "" : "s"} not backed up` : "key ok · dev wallet ready"
   return (
     <header className="bg-background/80 sticky top-0 z-40 border-b backdrop-blur-md">
       <div className="flex h-14 w-full items-center gap-6 px-5 sm:px-6">

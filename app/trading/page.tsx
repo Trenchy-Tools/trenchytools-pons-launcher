@@ -1,10 +1,16 @@
 "use client"
 
 /**
- * Trading: pick a coin (my launches | paste), see every wallet with its balance and the coin, and trade from the row:
- * [amount][Buy] · [25%][50%][100%] sell, acting at once (a toast carries the result or the API's error verbatim). Select
- * rows → a bar: Buy [x] each · Sell 25 / 50 / 100 % of selected · Timed sell ▾. Live trades on the right; creator fees
- * (pump.fun) as one small row. This file is the same in the pump.fun and pons starters; lib/chain.ts holds what differs.
+ * Trading, the simple way: pick a coin (my launches | paste), then
+ *
+ *   BUY ALL   [amount] each  [Buy N wallets]          ☐ stagger
+ *   SELL ALL  [25%] [50%] [100%]                      ☑ include the dev wallet
+ *   LATER     sell [50]% of everything in [5] min [Set]
+ *   one row per wallet: balance · tokens · [amount][Buy] · [25][50][100]%
+ *
+ * Nothing needs selecting: the big buttons act on every wallet, the row buttons on that wallet. Live trades on the
+ * right; creator fees as one small row. This file is the same in the pump.fun and pons starters; lib/chain.ts holds
+ * what differs.
  */
 import * as React from "react"
 import { ExternalLink, RefreshCw } from "lucide-react"
@@ -13,10 +19,11 @@ import { FailureBox } from "@/components/failure"
 import { Button } from "@/components/ui/button"
 import { Checkbox, Input, Select } from "@/components/ui/input"
 import { Pill } from "@/components/ui/pill"
-import { Mono, Table, TBody, TD, TH, THead, TR } from "@/components/ui/table"
+import { Mono } from "@/components/ui/table"
 import { toast, toastFailure } from "@/components/ui/toast"
 import { del, failureOf, get, post, readChosenCoin, subscribe, writeChosenCoin, type Failure } from "@/lib/api"
 import { chain } from "@/lib/chain"
+import { cn } from "@/lib/cn"
 import { DEMO, TAB_NOTE } from "@/lib/browser/demo"
 
 type Launch = { id: string; name: string; symbol: string; mint?: string | null; token?: string | null; status: string; createdAt: string }
@@ -35,6 +42,21 @@ const ago = (ms: number) => { const s = Math.max(0, Math.round((Date.now() - ms)
 const countdown = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` }
 const txOf = (x: { signature?: string; hash?: string }) => x.signature ?? x.hash
 const nativeOf = (t: Trade) => t.sol ?? t.eth ?? 0
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** The launcher's terminal buttons: tiny, bold, monospace, green for buys and red for sells. */
+const BUY_BTN = "rounded px-2.5 py-1.5 font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 transition-colors disabled:cursor-not-allowed disabled:opacity-30"
+const SELL_BTN = "rounded px-2.5 py-1.5 font-mono text-xs font-bold text-destructive hover:bg-destructive/30 transition-colors disabled:cursor-not-allowed disabled:opacity-30"
+function BuyBtn({ className, ...p }: React.ComponentProps<"button">) {
+  return <button type="button" className={cn(BUY_BTN, className)} {...p} />
+}
+function SellBtn({ hot, className, ...p }: React.ComponentProps<"button"> & { hot?: boolean }) {
+  return <button type="button" className={cn(SELL_BTN, hot ? "bg-destructive/20" : "bg-destructive/10", className)} {...p} />
+}
+/** A colored uppercase tag that names a terminal row, like the launcher's bulk-tag. */
+function Tag({ tone, children }: { tone: "buy" | "sell"; children: React.ReactNode }) {
+  return <span className={cn("rounded px-2 py-1 font-mono text-[11px] font-bold tracking-wide uppercase", tone === "buy" ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-destructive/10 text-destructive")}>{children}</span>
+}
 
 export default function TradingPage() {
   const [launches, setLaunches] = React.useState<Launch[]>([])
@@ -45,9 +67,10 @@ export default function TradingPage() {
   const [rows, setRows] = React.useState<Map<string, Row>>(new Map())
   const [failure, setFailure] = React.useState<Failure | null>(null)
   const [busy, setBusy] = React.useState<string | null>(null)
-  const [selected, setSelected] = React.useState<Set<string>>(new Set())
   const [buyAmt, setBuyAmt] = React.useState<Record<string, string>>({})
   const [eachBuy, setEachBuy] = React.useState(chain.defaultBuy)
+  const [stagger, setStagger] = React.useState(false)
+  const [includeDev, setIncludeDev] = React.useState(true)
   const [partialFill, setPartialFill] = React.useState(false)
   const [timers, setTimers] = React.useState<Timer[]>([])
   const [timerMin, setTimerMin] = React.useState("5")
@@ -66,10 +89,15 @@ export default function TradingPage() {
   const q = (c: string) => `${cp}=${encodeURIComponent(c)}`
   const sym = token?.quote?.symbol ?? chain.symbol
   const mayhem = chain.features.mayhem && token?.mayhem?.enabled === true
-  const picked = [...selected].filter((pk) => wallets.some((w) => w.publicKey === pk))
   const row = (pk: string) => rows.get(pk.toLowerCase())
+  const held = (pk: string) => (row(pk)?.tokens ?? 0) > 0
   const last = trades.find((t) => t.tokens > 0 && nativeOf(t) > 0)
   const price = last ? nativeOf(last) / last.tokens : null
+  // Buy all / Sell all / Later act on every wallet, the dev wallet too unless "include the dev wallet" is off.
+  const bulkTargets = wallets.filter((w) => includeDev || w.publicKey !== main).map((w) => w.publicKey)
+  const skipDev = !includeDev
+  // the dev wallet first, then the rest
+  const ordered = [...wallets].sort((a, b) => (a.publicKey === main ? -1 : b.publicKey === main ? 1 : 0))
 
   // my launches + the coin: ?mint= / ?token= in the address (the Launch page sends you here), else the one from last time
   React.useEffect(() => {
@@ -107,7 +135,7 @@ export default function TradingPage() {
 
   // the coin: name, symbol, venue, flags; remembered for the Wallets page's balance column
   React.useEffect(() => {
-    setToken(null); setPartialFill(false); setSelected(new Set())
+    setToken(null); setPartialFill(false)
     if (!valid) return
     get<Token>(`/api/trading/token?${q(coin)}`).then((t) => { setToken(t); writeChosenCoin({ coin, symbol: t.symbol ?? undefined }) }).catch(() => { setToken(null); writeChosenCoin({ coin }) })
   }, [coin, valid]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -136,7 +164,6 @@ export default function TradingPage() {
     setBusy(name)
     try { await fn() } catch (e) { toastFailure(failureOf(e)) } finally { setBusy(null) }
   }
-  const toggle = (pk: string) => setSelected((s) => { const n = new Set(s); if (n.has(pk)) n.delete(pk); else n.add(pk); return n })
   const label = (pk: string) => wallets.find((w) => w.publicKey === pk)?.label ?? chain.short(pk)
   const link = (sig: string) => <a className="underline underline-offset-4" href={chain.explorerTx(sig)} target="_blank" rel="noreferrer"><Mono className="text-xs">{chain.short(sig)}</Mono></a>
   const amountOf = (r: Result) => r.expected?.quoteAmount ?? r.expected?.eth
@@ -156,22 +183,31 @@ export default function TradingPage() {
     toast({ tone: "ok", title: `${label(pk)} sold ${percent}%${r.expected ? ` · ${fmtTokens(r.expected.tokens)} tokens for ${amountOf(r)} ${r.quote?.symbol ?? sym}` : ""}`, detail: <>{r.confirmed === false ? "sent, not confirmed yet · " : ""}{s ? link(s) : null}</> })
     await load()
   })
-  const buySelected = () => run("buy-all", async () => {
+
+  // ── Buy all / Sell all: the whole fleet (or all but the dev) in one press ─
+  const buyAll = () => run("buy-all", async () => {
     const a = Number(eachBuy)
     if (!(a > 0)) throw { error: `Enter the ${sym} amount each wallet buys with` }
+    if (bulkTargets.length === 0) throw { error: "No wallets to buy from" }
     const out: Result[] = []
-    for (const pk of picked) {
+    for (let i = 0; i < bulkTargets.length; i++) {
+      const pk = bulkTargets[i]
       try { out.push(await post<Result>("/api/trading/buy", { publicKey: pk, [cp]: coin, amount: a, ...(mayhem && partialFill ? { partialFill: true } : {}) })) }
       catch (e) { const f = failureOf(e); out.push({ publicKey: pk, error: f.error, code: f.code }) }
+      // stagger: a short human-ish gap between wallets so the buys don't all hit the same block
+      if (stagger && i < bulkTargets.length - 1) await sleep(300 + Math.random() * 900)
     }
-    report(`Buy ${a} ${sym} each`, out)
+    report(`Buy ${a} ${sym} each${skipDev ? " · no dev" : ""}${stagger ? " · staggered" : ""}`, out)
     await load()
   })
-  const sellSelected = (percent: number) => run(`sell-all:${percent}`, async () => {
-    const r = await post<{ results: Result[] }>("/api/trading/sell-all", { publicKeys: picked, [cp]: coin, percent })
-    report(`Sell ${percent}% of selected`, r.results)
+  const sellAll = (percent: number) => run(`sellall:${percent}`, async () => {
+    const targets = bulkTargets.filter(held)
+    if (targets.length === 0) throw { error: "No wallet holds this coin" }
+    const r = await post<{ results: Result[] }>("/api/trading/sell-all", { publicKeys: targets, [cp]: coin, percent })
+    report(`Sell ${percent}%${skipDev ? " · no dev" : ""}`, r.results)
     await load()
   })
+
   const report = (title: string, results: Result[]) => {
     const failed = results.filter((r) => r.error).length
     toast({
@@ -190,8 +226,10 @@ export default function TradingPage() {
     })
   }
   const addTimer = () => run("timer", async () => {
-    await post("/api/trading/timers", { [cp]: coin, publicKeys: picked, percent: Number(timerPct) || 100, minutes: Number(timerMin) || 0 })
-    toast({ tone: "ok", title: `Timed sell set: ${timerPct}% from ${picked.length} wallet${picked.length === 1 ? "" : "s"} in ${timerMin} min`, detail: DEMO ? TAB_NOTE : "Kept in the server's memory; a restart forgets it." })
+    const targets = bulkTargets.filter(held)
+    if (targets.length === 0) throw { error: "No wallet holds this coin yet" }
+    await post("/api/trading/timers", { [cp]: coin, publicKeys: targets, percent: Number(timerPct) || 100, minutes: Number(timerMin) || 0 })
+    toast({ tone: "ok", title: `Set: sell ${timerPct}% from ${targets.length} wallet${targets.length === 1 ? "" : "s"} in ${timerMin} min`, detail: DEMO ? TAB_NOTE : "Kept in the server's memory; a restart forgets it." })
     loadTimers()
   })
   const cancelTimer = (id: string) => run(`cancel:${id}`, async () => { await del(`/api/trading/timers?id=${encodeURIComponent(id)}`); loadTimers() })
@@ -256,83 +294,76 @@ export default function TradingPage() {
       {valid ? (
         <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
           <div className="flex flex-col gap-3">
-            <Table>
-              <THead>
-                <TR>
-                  <TH className="w-8"><Checkbox checked={wallets.length > 0 && picked.length === wallets.length} onChange={(e) => setSelected(e.target.checked ? new Set(wallets.map((w) => w.publicKey)) : new Set())} aria-label="Select all" /></TH>
-                  <TH>Wallet</TH>
-                  <TH className="text-right">{chain.symbol}</TH>
-                  <TH className="text-right">Tokens</TH>
-                  <TH className="text-right">Value</TH>
-                  <TH>
-                    <span className="inline-flex items-center gap-2">Buy ({sym})
-                      {mayhem ? <label className="inline-flex items-center gap-1 normal-case" title="Mayhem coins: a buy past the remaining supply takes what is left instead of failing"><Checkbox checked={partialFill} onChange={(e) => setPartialFill(e.target.checked)} className="size-3" /> partial fill</label> : null}
-                    </span>
-                  </TH>
-                  <TH>Sell</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {wallets.length === 0 ? <TR><TD colSpan={7} className="text-muted-foreground py-6 text-center">No wallets yet: create some on the Wallets page.</TD></TR> : null}
-                {wallets.map((w) => {
+            {/* ── the terminal: one press buys / sells / schedules over every wallet ── */}
+            <div className="flex flex-col divide-y rounded-xl border-2">
+              <div className="flex flex-wrap items-center gap-2 px-3 py-3">
+                <Tag tone="buy">Buy all</Tag>
+                <Input inputMode="decimal" value={eachBuy} onChange={(e) => setEachBuy(e.target.value)} className="h-8 w-24 font-mono text-xs" aria-label="Buy amount each" />
+                <span className="text-muted-foreground text-xs">{sym} each</span>
+                <BuyBtn className="px-3 py-2" disabled={!!busy || bulkTargets.length === 0} onClick={buyAll}>{busy === "buy-all" ? "Buying…" : `Buy with ${bulkTargets.length} wallet${bulkTargets.length === 1 ? "" : "s"}`}</BuyBtn>
+                <label className="text-muted-foreground ml-auto inline-flex cursor-pointer items-center gap-1.5 text-xs" title="A short random pause between wallets instead of all at once"><Checkbox checked={stagger} onChange={(e) => setStagger(e.target.checked)} className="size-3.5" /> one by one</label>
+                {mayhem ? <label className="text-muted-foreground inline-flex cursor-pointer items-center gap-1.5 text-xs" title="Mayhem coins: a buy past the remaining supply takes what is left instead of failing"><Checkbox checked={partialFill} onChange={(e) => setPartialFill(e.target.checked)} className="size-3.5" /> partial fill</label> : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 px-3 py-3">
+                <Tag tone="sell">Sell all</Tag>
+                {[25, 50, 100].map((p) => <SellBtn key={p} hot={p === 100} className="px-3 py-2" disabled={!!busy} onClick={() => void sellAll(p)}>{busy === `sellall:${p}` ? "…" : `${p}%`}</SellBtn>)}
+                <span className="text-muted-foreground text-xs">from every wallet that holds it</span>
+                <label className="text-muted-foreground ml-auto inline-flex cursor-pointer items-center gap-1.5 text-xs" title="Off: Buy all, Sell all and Later leave the dev wallet alone"><Checkbox checked={includeDev} onChange={(e) => setIncludeDev(e.target.checked)} className="size-3.5" /> include the dev wallet</label>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 text-xs">
+                <span className="bg-muted text-muted-foreground rounded px-2 py-1 font-mono text-[11px] font-bold tracking-wide uppercase">Later</span>
+                <span className="text-muted-foreground">sell</span>
+                <Input inputMode="numeric" value={timerPct} onChange={(e) => setTimerPct(e.target.value)} className="h-7 w-14 font-mono text-xs" aria-label="Percent" />
+                <span className="text-muted-foreground">% of everything in</span>
+                <Input inputMode="numeric" value={timerMin} onChange={(e) => setTimerMin(e.target.value)} className="h-7 w-14 font-mono text-xs" aria-label="Minutes" />
+                <span className="text-muted-foreground">min</span>
+                <Button size="xs" variant="outline" onClick={addTimer} disabled={!!busy}>{busy === "timer" ? "Setting…" : "Set"}</Button>
+                {pendingTimers ? <span className="text-warn">{pendingTimers} waiting</span> : null}
+              </div>
+            </div>
+
+            {/* ── every wallet, with its own balance, buy and sell ── */}
+            {wallets.length === 0 ? (
+              <p className="text-muted-foreground rounded-xl border px-3 py-6 text-center text-sm">No wallets yet: <a href="/wallets" className="underline underline-offset-4">add some on the Wallets page</a>, or launch a coin (the Launch page makes them).</p>
+            ) : (
+              <div className="flex flex-col divide-y rounded-xl border">
+                <div className="text-muted-foreground flex items-center gap-3 px-3 py-1.5 text-[11px] tracking-wide uppercase">
+                  <span className="flex-1">Wallet</span>
+                  <span className="w-20 text-right">{chain.symbol}</span>
+                  <span className="w-20 text-right">Tokens</span>
+                  {/* invisible copies of the row's controls, so the column titles sit over their numbers */}
+                  <span aria-hidden className="invisible inline-flex h-0 items-center gap-1"><span className="w-20" /><BuyBtn tabIndex={-1}>Buy</BuyBtn></span>
+                  <span aria-hidden className="invisible inline-flex h-0 gap-1">{[25, 50, 100].map((p) => <SellBtn key={p} tabIndex={-1}>{p}%</SellBtn>)}</span>
+                </div>
+                {ordered.map((w) => {
                   const r = row(w.publicKey)
-                  const held = (r?.tokens ?? 0) > 0
+                  const has = (r?.tokens ?? 0) > 0
+                  const isDev = w.publicKey === main
                   return (
-                    <TR key={w.publicKey} data-selected={selected.has(w.publicKey)} className={held ? "" : "text-muted-foreground"}>
-                      <TD><Checkbox checked={selected.has(w.publicKey)} onChange={() => toggle(w.publicKey)} aria-label={`Select ${w.label}`} /></TD>
-                      <TD><span className={w.publicKey === main ? "text-foreground font-medium" : "text-foreground"}>{w.publicKey === main ? "★ " : ""}{w.label}</span> <Mono className="text-muted-foreground ml-1 text-xs">{chain.short(w.publicKey)}</Mono></TD>
-                      <TD className="text-right font-mono text-xs">{chain.fmt(r?.native)}</TD>
-                      <TD className="text-right font-mono text-xs">{fmtTokens(r?.tokens)}</TD>
-                      <TD className="text-right font-mono text-xs">{price !== null && r?.tokens ? `${(r.tokens * price).toFixed(4)} ${sym}` : "–"}</TD>
-                      <TD>
-                        <span className="inline-flex items-center gap-1">
-                          <Input inputMode="decimal" className="h-7 w-20 font-mono text-xs" value={buyAmt[w.publicKey] ?? chain.defaultBuy} onChange={(e) => setBuyAmt((s) => ({ ...s, [w.publicKey]: e.target.value }))} aria-label={`${w.label} buy amount`} />
-                          <Button size="xs" variant="outline" onClick={() => void buy(w.publicKey, buyAmt[w.publicKey] ?? chain.defaultBuy)} disabled={!!busy}>{busy === `buy:${w.publicKey}` ? "…" : "Buy"}</Button>
-                        </span>
-                      </TD>
-                      <TD>
-                        <span className="inline-flex gap-1">
-                          {[25, 50, 100].map((p) => <Button key={p} size="xs" variant="outline" onClick={() => void sell(w.publicKey, p)} disabled={!!busy || !held} title={held ? `Sell ${p}% of ${w.label}'s tokens now` : "holds none"}>{busy === `sell:${w.publicKey}:${p}` ? "…" : `${p}%`}</Button>)}
-                        </span>
-                      </TD>
-                    </TR>
+                    <div key={w.publicKey} className={cn("flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5", isDev ? "bg-ok/5" : "")}>
+                      <div className="flex min-w-36 flex-1 items-center gap-1.5">
+                        {isDev ? <span className="bg-ok text-background rounded px-1.5 py-0.5 text-[10px] font-bold tracking-[0.12em] uppercase">Dev</span> : null}
+                        <span className="font-medium">{isDev ? "Dev wallet" : w.label}</span>
+                        <Mono className="text-muted-foreground text-xs">{chain.short(w.publicKey)}</Mono>
+                      </div>
+                      <span className="w-20 text-right font-mono text-xs">{chain.fmt(r?.native)}</span>
+                      <span className={cn("w-20 text-right font-mono text-xs", has ? "" : "text-muted-foreground")}>{fmtTokens(r?.tokens)}</span>
+                      <span className="inline-flex items-center gap-1">
+                        <Input inputMode="decimal" className="h-7 w-20 font-mono text-xs" value={buyAmt[w.publicKey] ?? chain.defaultBuy} onChange={(e) => setBuyAmt((s) => ({ ...s, [w.publicKey]: e.target.value }))} aria-label={`${w.label} buy amount`} />
+                        <BuyBtn disabled={!!busy} onClick={() => void buy(w.publicKey, buyAmt[w.publicKey] ?? chain.defaultBuy)}>{busy === `buy:${w.publicKey}` ? "…" : "Buy"}</BuyBtn>
+                      </span>
+                      <span className="inline-flex gap-1">
+                        {[25, 50, 100].map((p) => <SellBtn key={p} hot={p === 100} disabled={!!busy || !has} title={has ? `Sell ${p}% of this wallet's tokens now` : "holds none"} onClick={() => void sell(w.publicKey, p)}>{busy === `sell:${w.publicKey}:${p}` ? "…" : `${p}%`}</SellBtn>)}
+                      </span>
+                    </div>
                   )
                 })}
-              </TBody>
-            </Table>
-
-            {picked.length > 0 ? (
-              <div className="bg-background/95 sticky bottom-3 z-30 flex flex-col gap-2 rounded-xl border p-3 shadow-lg backdrop-blur">
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="font-medium">{picked.length} selected</span>
-                  <button type="button" className="text-muted-foreground hover:text-foreground text-xs underline-offset-4 hover:underline" onClick={() => setSelected(new Set())}>clear</button>
-                  <span className="text-muted-foreground mx-1">·</span>
-                  <span className="text-muted-foreground">Buy</span>
-                  <Input inputMode="decimal" value={eachBuy} onChange={(e) => setEachBuy(e.target.value)} className="h-8 w-24 font-mono" aria-label="Buy amount each" />
-                  <span className="text-muted-foreground">{sym} each</span>
-                  <Button size="sm" onClick={buySelected} disabled={!!busy}>{busy === "buy-all" ? "Buying…" : `Buy with ${picked.length}`}</Button>
-                  <span className="text-muted-foreground mx-1">·</span>
-                  <span className="text-muted-foreground">Sell</span>
-                  {[25, 50, 100].map((p) => <Button key={p} size="sm" variant={p === 100 ? "destructive" : "outline"} onClick={() => void sellSelected(p)} disabled={!!busy}>{busy === `sell-all:${p}` ? "…" : `${p}%`}</Button>)}
-                  <span className="text-muted-foreground">of selected</span>
-                </div>
-                <details className="text-sm">
-                  <summary className="text-muted-foreground hover:text-foreground cursor-pointer select-none">Timed sell ▾{pendingTimers ? <span className="ml-2 text-xs">({pendingTimers} pending)</span> : null}</summary>
-                  <div className="mt-2 flex flex-wrap items-center gap-2 border-t pt-2">
-                    <span className="text-muted-foreground">In</span>
-                    <Input inputMode="numeric" value={timerMin} onChange={(e) => setTimerMin(e.target.value)} className="h-8 w-16 font-mono" aria-label="Minutes" />
-                    <span className="text-muted-foreground">min sell</span>
-                    <Input inputMode="numeric" value={timerPct} onChange={(e) => setTimerPct(e.target.value)} className="h-8 w-16 font-mono" aria-label="Percent" />
-                    <span className="text-muted-foreground">% from the {picked.length} selected</span>
-                    <Button size="sm" variant="outline" onClick={addTimer} disabled={!!busy}>Add</Button>
-                  </div>
-                </details>
               </div>
-            ) : null}
+            )}
 
             {timers.length > 0 ? (
               <div className="flex flex-col gap-1 text-sm">
-                <div className="flex items-center justify-between text-xs"><span className="text-muted-foreground">{DEMO ? "Timed sells (kept in this browser; keep this tab open)" : "Timed sells (server memory; a restart forgets them)"}</span><button type="button" className="text-muted-foreground hover:text-foreground underline-offset-4 hover:underline" onClick={() => void del("/api/trading/timers").then(loadTimers)}>clear finished</button></div>
+                <div className="flex items-center justify-between text-xs"><span className="text-muted-foreground">{DEMO ? "Sells set for later (keep this tab open)" : "Sells set for later (a server restart forgets them)"}</span><button type="button" className="text-muted-foreground hover:text-foreground underline-offset-4 hover:underline" onClick={() => void del("/api/trading/timers").then(loadTimers)}>clear finished</button></div>
                 {timers.map((t) => (
                   <div key={t.id} className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-1.5">
                     <Pill tone={t.status === "done" ? "ok" : t.status === "error" ? "error" : t.status === "pending" ? "warn" : "muted"}>{t.status}</Pill>

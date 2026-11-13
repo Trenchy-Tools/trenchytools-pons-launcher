@@ -599,31 +599,31 @@ export default function TradingPage() {
               {pnl ? (
                 pnl.trades === 0 ? <p className="text-muted-foreground">None of your wallets has traded this coin yet.</p> : (
                   <>
-                    <p className={cn("font-mono text-xl leading-tight font-semibold tabular-nums", pnl.net > 0 ? "text-ok" : pnl.net < 0 ? "text-destructive" : "")}>
-                      <Nudge value={pnl.net.toFixed(chain.decimals)}>{pnl.net > 0 ? "+" : ""}{pnl.net.toFixed(chain.decimals)} {chain.symbol}</Nudge>
-                    </p>
-                    <p className="text-muted-foreground -mt-0.5 text-[10px] tracking-wide uppercase">{pnl.tokensHeld > 0 ? "realised so far" : "final · every wallet has sold"}</p>
-                    <div className="text-muted-foreground flex flex-col text-[11px]">
-                      <div className="flex justify-between"><span>Spent (buys + every fee)</span><Mono className="text-[11px]"><Nudge value={pnl.spent.toFixed(chain.decimals)}>{pnl.spent.toFixed(chain.decimals)}</Nudge></Mono></div>
-                      <div className="flex justify-between"><span>Got back (sells)</span><Mono className="text-[11px]"><Nudge value={pnl.received.toFixed(chain.decimals)}>{pnl.received.toFixed(chain.decimals)}</Nudge></Mono></div>
-                      {pnl.tokensHeld > 0 ? (
+                    {(() => {
+                      const open = pnl.tokensHeld > 0
+                      // the open part: a live sell quote of everything held (slippage + fees in it), else the last price
+                      const exit = !open ? 0 : pnl.exitNative ?? (price !== null ? pnl.tokensHeld * price : null)
+                      const quoted = pnl.exitNative !== null && pnl.exitNative !== undefined
+                      const shown = !open ? pnl.net : exit === null ? null : pnl.net + exit
+                      const num = (n: number) => n.toFixed(chain.decimals)
+                      return (
                         <>
-                          {(() => {
-                            // the open part: a live sell quote of everything held (slippage + fees in it), else the last price
-                            const exit = pnl.exitNative ?? (price !== null ? pnl.tokensHeld * price : null)
-                            const quoted = pnl.exitNative !== null && pnl.exitNative !== undefined
-                            const total = exit === null ? null : pnl.net + exit
-                            return (
-                              <>
-                                <div className="flex justify-between"><span>Still holding{pnl.holders ? ` (${pnl.holders} wallet${pnl.holders === 1 ? "" : "s"})` : ""}</span><Mono className="text-[11px]">{fmtTokens(pnl.tokensHeld)} tokens{exit !== null ? ` ≈ ${exit.toFixed(chain.decimals)}` : ""}</Mono></div>
-                                {total !== null ? <div className="text-foreground mt-0.5 flex justify-between border-t pt-0.5 font-medium" title={quoted ? "A live sell quote of all the tokens at once: the curve's slippage, pump.fun's and our fee and the network fees are in it" : "Last trade's price x tokens: the price drop of selling is not in it"}><span>If you sold everything now ≈</span><Mono className={cn("text-[11px]", total >= 0 ? "text-ok" : "text-destructive")}>{total >= 0 ? "+" : ""}{total.toFixed(chain.decimals)}</Mono></div> : null}
-                                <p className="text-muted-foreground/80 text-[10px] leading-snug">Not final until every wallet has sold: the open part is {quoted ? "a live sell quote of all of it at once" : "the last price (no quote yet)"}, and it moves with the price.</p>
-                              </>
-                            )
-                          })()}
+                          {shown === null ? <p className="text-muted-foreground text-sm">Open: the result shows once your wallets have sold.</p> : (
+                            <p className={cn("font-mono leading-tight font-semibold tabular-nums", open ? "text-lg" : "text-xl", shown > 0 ? "text-ok" : shown < 0 ? "text-destructive" : "", open && "opacity-80")}
+                              title={open ? (quoted ? "A live sell quote of all the tokens at once: the price drop of selling, the launchpad's and our fee and the network fees are in it" : "Last trade's price x tokens: the price drop of selling is not in it") : undefined}>
+                              <Nudge value={num(shown)}>{open ? "≈ " : ""}{shown > 0 ? "+" : ""}{num(shown)} {chain.symbol}</Nudge>
+                            </p>
+                          )}
+                          <p className={cn("-mt-0.5 text-[10px] tracking-wide uppercase", open ? "text-warn" : "text-muted-foreground")}>{open ? "estimate if you sold everything now · not final" : "final · every wallet has sold"}</p>
+                          <div className="text-muted-foreground flex flex-col text-[11px]">
+                            <div className="flex justify-between"><span>Spent (buys + every fee)</span><Mono className="text-[11px]"><Nudge value={num(pnl.spent)}>{num(pnl.spent)}</Nudge></Mono></div>
+                            <div className="flex justify-between"><span>Got back (sells)</span><Mono className="text-[11px]"><Nudge value={num(pnl.received)}>{num(pnl.received)}</Nudge></Mono></div>
+                            {open ? <div className="flex justify-between"><span>Still holding{pnl.holders ? ` (${pnl.holders} wallet${pnl.holders === 1 ? "" : "s"})` : ""}</span><Mono className="text-[11px]">{fmtTokens(pnl.tokensHeld)} tokens{exit !== null ? ` ≈ ${num(exit)}` : ""}</Mono></div> : null}
+                          </div>
+                          {open ? <p className="text-muted-foreground/80 text-[10px] leading-snug">It moves with the price. The real result shows here once every wallet has sold.</p> : null}
                         </>
-                      ) : null}
-                    </div>
+                      )
+                    })()}
                     <details className="text-muted-foreground text-[11px]">
                       <summary className="hover:text-foreground cursor-pointer select-none">Per wallet · {pnl.trades} transaction{pnl.trades === 1 ? "" : "s"}</summary>
                       <div className="mt-1 flex max-h-28 flex-col overflow-y-auto">

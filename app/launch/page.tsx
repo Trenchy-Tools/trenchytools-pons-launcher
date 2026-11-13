@@ -46,7 +46,7 @@ type PoolView = { available: number; used: number }
 type Job = { status: "idle" | "running" | "done" | "failed"; attempts: number; expectedAttempts: number; rate: number; found: string | null; error: string | null }
 /** One line of the launch log: `signature` + `mint` on Solana, `hash` + `token` on EVM chains. */
 type Event = { at: number; stage: string; message: string; signature?: string; hash?: string; mint?: string; token?: string; link?: string }
-type Simulate = { ok: boolean; checks: Array<{ name: string; ok: boolean; detail: string }>; simulation: { ok: boolean; logs: string[] } | null; calls?: ApiCall[] }
+type Simulate = { ok: boolean; checks: Array<{ name: string; ok: boolean; detail: string }>; simulation: { ok: boolean; logs?: string[] } | null; calls?: ApiCall[] }
 /** What POST /api/ipfs gave back: the metadata URI (pump.fun creates) and the image link (EVM creates take metadata.image). */
 type Meta = { metadataUri: string; image: string }
 /** One buyer row: a wallet of the folder, or null = a new wallet made at launch; the amount as typed. */
@@ -983,7 +983,7 @@ export default function LaunchPage() {
             <ul className="flex flex-col gap-1 text-xs">
               {sim.checks.map((c) => <li key={c.name} className="flex gap-2"><span className={c.ok ? "text-ok" : "text-destructive"}>{c.ok ? "✓" : "✗"}</span><span className="text-muted-foreground w-16 shrink-0">{c.name}</span><span className="break-all">{c.detail}</span></li>)}
             </ul>
-            {sim.simulation && !sim.simulation.ok && sim.simulation.logs.length ? <pre className="bg-muted max-h-32 overflow-auto rounded-md p-2 text-[10px] whitespace-pre-wrap">{sim.simulation.logs.join("\n")}</pre> : null}
+            {sim.simulation && !sim.simulation.ok && sim.simulation.logs?.length ? <pre className="bg-muted max-h-32 overflow-auto rounded-md p-2 text-[10px] whitespace-pre-wrap">{sim.simulation.logs.join("\n")}</pre> : null}
             <details className="border-t pt-2 text-xs">
               <summary className="text-muted-foreground hover:text-foreground cursor-pointer select-none">API calls ({sim.calls?.length ?? 0}) · what this app sent and got back</summary>
               <div className="mt-2"><ApiCalls calls={sim.calls} title="" empty="No calls." /></div>

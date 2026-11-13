@@ -38,7 +38,7 @@ export function DemoBanner() {
   }
   return (
     <div role="note" className="text-muted-foreground truncate border-b px-3 py-1 text-center text-[11px] sm:px-6 sm:py-1.5 sm:text-xs">
-      Demo: all keys are stored in your browser.<span className="hidden md:inline"> Trades pay a {+(chain.apiFeeRate * 100).toFixed(2)} % API fee.</span>{" "}
+      Demo: all keys are stored in your browser.{chain.apiFeeRate > 0 ? <span className="hidden md:inline"> Trades pay a {+(chain.apiFeeRate * 100).toFixed(2)} % API fee.</span> : null}{" "}
       <button type="button" className="hover:text-foreground underline underline-offset-4" onClick={() => void downloadBackup()} disabled={downloading}>{downloading ? "Downloading…" : <>Download<span className="hidden sm:inline"> backup</span></>}</button>
       {" · "}
       <a className="hover:text-foreground underline underline-offset-4" href={REPO_URL} target="_blank" rel="noreferrer">Clone it</a><span className="hidden sm:inline"> to run locally</span>.

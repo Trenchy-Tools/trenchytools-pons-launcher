@@ -16,6 +16,8 @@ const CSP = [
   `connect-src 'self' https://api.trenchy.tools wss://api.trenchy.tools${DEV && process.env.NEXT_PUBLIC_TRENCHY_API_URL ? ` ${process.env.NEXT_PUBLIC_TRENCHY_API_URL} ${process.env.NEXT_PUBLIC_TRENCHY_API_URL.replace(/^http/, "ws")}` : ""}`,
   "img-src 'self' data: blob: https:",
   `script-src 'self' 'unsafe-inline'${DEV ? " 'unsafe-eval'" : ""}`,
+  // the Vanity page grinds mint keys in Web Workers made from an inline blob
+  "worker-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "object-src 'none'",

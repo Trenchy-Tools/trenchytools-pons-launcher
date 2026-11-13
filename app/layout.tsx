@@ -12,11 +12,11 @@ import "./globals.css"
 const sans = Space_Grotesk({ subsets: ["latin"], variable: "--font-space-grotesk" })
 const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-ibm-plex-mono" })
 
-const DESCRIPTION = `Launch, bundle and trade ${chain.launchpad} coins on the TrenchyTools API${process.env.NEXT_PUBLIC_DEMO === "1" ? ", from your browser" : ""}.`
+const DESCRIPTION = `${(chain as { description?: string }).description ?? `Launch, bundle and trade ${chain.launchpad} coins on the TrenchyTools API`}${process.env.NEXT_PUBLIC_DEMO === "1" ? ", from your browser" : ""}.`
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? suiteItem(chain.suiteId)?.url ?? "https://trenchy.tools"),
-  openGraph: { type: "website", siteName: "TrenchyTools", title: `${chain.launchpad} launcher · TrenchyTools`, description: DESCRIPTION, images: [{ url: "/og.png", width: 1280, height: 640, alt: `${chain.launchpad} launcher on the TrenchyTools API` }] },
-  twitter: { card: "summary_large_image", site: "@trenchytools", title: `${chain.launchpad} launcher · TrenchyTools`, description: DESCRIPTION, images: ["/og.png"] },
+  openGraph: { type: "website", siteName: "TrenchyTools", title: `${chain.appName} · TrenchyTools`, description: DESCRIPTION, images: [{ url: "/og.png", width: 1280, height: 640, alt: `${chain.appName} on the TrenchyTools API` }] },
+  twitter: { card: "summary_large_image", site: "@trenchytools", title: `${chain.appName} · TrenchyTools`, description: DESCRIPTION, images: ["/og.png"] },
   title: { default: `${chain.appName} · TrenchyTools`, template: `%s · ${chain.appName}` },
   description: DESCRIPTION,
   icons: { icon: "/icon.svg" },

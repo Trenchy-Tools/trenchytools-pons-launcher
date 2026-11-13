@@ -40,6 +40,8 @@ export type TradeBody = {
   exemptWallets?: string[]
   /** the launchpad of a create (lib/chain.ts evm.createVenue when absent); trades detect it */
   venue?: string
+  /** collectCreatorFee on pads that pay through a launch-time position (pools.trade): the create transaction */
+  launchTx?: string
 }
 export type Built = { chainId: number; transactions: EvmTx[]; expected: Expected; venue: "curve" | "v4"; predicted?: { token: string; curve: string }; launchFeeEth?: number }
 export type TxStatus = { hash: string; status: "success" | "reverted" | "pending_or_unknown"; block?: number; gasUsed?: string }
@@ -219,11 +221,11 @@ export class Trenchy {
     tradeHistory: (token: string, limit = 100, fromBlock?: number) => this.get<{ token: string; head?: number; trades: Array<Record<string, unknown>> }>(`${this.base}/trades?token=${token}&limit=${limit}${fromBlock ? `&fromBlock=${fromBlock}` : ""}`),
 
     /** GET /api/<chain>/creator-fees?wallet=&token=: what the creator can claim (escrow) and what the coin's curve still holds. */
-    creatorFees: async (wallet: string, token?: string): Promise<CreatorFees> => {
-      const f = await this.get<CreatorFees & Record<string, unknown>>(`${this.base}/creator-fees?wallet=${wallet}${token ? `&token=${token}` : ""}`)
+    creatorFees: async (wallet: string, token?: string, at: { venue?: string; launchTx?: string } = {}): Promise<CreatorFees> => {
+      const f = await this.get<CreatorFees & Record<string, unknown>>(`${this.base}/creator-fees?wallet=${wallet}${token ? `&token=${token}` : ""}${at.venue ? `&venue=${at.venue}` : ""}${at.launchTx ? `&launchTx=${at.launchTx}` : ""}`)
       // pons: escrow eth + the curve's pending · Elysium pads: claimableHype (+ pendingHype) · Flap: the processor's pendingBnb
       const n = (v: unknown) => (typeof v === "number" ? v : 0)
-      const eth = n(f.eth ?? f.claimableEth ?? f.claimableHype ?? f.pendingBnb ?? f.claimableUsdc ?? f.claimable)
+      const eth = n(f.eth ?? f.claimableEth ?? f.claimableHype ?? f.pendingBnb ?? f.claimableUsdc ?? f.creatorWeth ?? f.claimableWeth ?? f.claimable)
       return { ...f, eth, claimableEth: n(f.claimableEth ?? f.claimableHype ?? f.pendingBnb ?? f.claimableUsdc ?? f.claimable), curve: f.curve ?? (f.pendingHype ? { token: token ?? "", curve: "", creator: wallet, graduated: false, pendingEth: n(f.pendingHype), sweepable: false } : null) }
     },
 

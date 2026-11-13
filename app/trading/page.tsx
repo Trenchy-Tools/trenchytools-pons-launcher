@@ -41,7 +41,7 @@ type Trade = { signature?: string; hash?: string; type: "buy" | "sell"; trader: 
 type Timer = { id: string; publicKeys: string[]; percent: number; dueAt: number; status: string; error?: string; result?: Array<{ publicKey: string; signature?: string; hash?: string; error?: string; skipped?: string }> }
 /** A trade's answer, either starter: `signature` (Solana) or `hash` (EVM); `expected.quoteAmount` or `expected.eth`. */
 type Result = { publicKey: string; signature?: string; hash?: string; confirmed?: boolean; expected?: { tokens: number; quoteAmount?: number; eth?: number }; quote?: { symbol: string }; error?: string; code?: string; skipped?: string }
-type Fees = { creator: string; sol: number }
+type Fees = { creator: string; sol: number; /** the coin's launchpad pays nothing to claim: why */ none?: string }
 
 const fmtTokens = (n: number | undefined) => (n === undefined ? "–" : n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : n.toLocaleString("en-US", { maximumFractionDigits: n < 1 ? 4 : 0 }))
 const ago = (ms: number) => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h` }
@@ -405,7 +405,7 @@ export default function TradingPage() {
   type CloseStep = { key: string; title: string; detail: string; done: boolean; label: string; blocked?: string; act: () => Promise<void> }
   const closeSteps: CloseStep[] = [
     { key: "sell", title: "Sell what is left", detail: holdersLeft.length ? `${holdersLeft.length} wallet${holdersLeft.length === 1 ? " still holds" : "s still hold"} ${fmtTokens(tokensLeft)} tokens` : "Every wallet has sold", done: holdersLeft.length === 0, label: "Sell 100%", act: sellLeftRaw },
-    ...(chain.features.creatorFees ? [{ key: "claim", title: "Claim creator fees", detail: fees && fees.sol > 0 ? `${chain.fmt(fees.sol)} ${chain.symbol} waiting for you` : "Nothing to claim right now", done: !fees || fees.sol <= 0, label: "Claim", act: claimRaw }] : []),
+    ...(chain.features.creatorFees && !fees?.none ? [{ key: "claim", title: "Claim creator fees", detail: fees && fees.sol > 0 ? `${chain.fmt(fees.sol)} ${chain.symbol} waiting for you` : "Nothing to claim right now", done: !fees || fees.sol <= 0, label: "Claim", act: claimRaw }] : []),
     ...(chain.features.tokenAccounts ? [{ key: "close", title: "Close empty token accounts", detail: `Each one holds about 0.002 ${chain.symbol} of rent; it comes back to your main wallet`, done: closedAccounts || runWallets.length === 0, label: "Close", blocked: holdersLeft.length ? "Sell what is left first" : undefined, act: closeAccountsRaw }] : []),
     { key: "sweep", title: "Sweep everything to the main wallet", detail: sweepable.length ? `${chain.fmt(sweepSum)} ${chain.symbol} in ${sweepable.length} buyer wallet${sweepable.length === 1 ? "" : "s"}` : "The buyer wallets are empty", done: sweepable.length === 0, label: "Sweep", act: async () => { await sweepRaw() } },
     { key: "archive", title: "Archive the used wallets", detail: (archivable.length ? `${archivable.length} wallet${archivable.length === 1 ? "" : "s"} leave your lists; keys stay in your backup, Restore brings them back` : "No buyer wallets to archive") + (keptCreator ? `. ${keptCreator.label} stays: it is the creator, and creator fees keep coming to it` : ""), done: archivable.length === 0, label: "Archive", blocked: sweepable.some((w) => !creators.has(w.publicKey.toLowerCase())) ? "Sweep first" : undefined, act: () => archiveRaw(archivable.map((w) => w.publicKey)) },
@@ -466,9 +466,10 @@ export default function TradingPage() {
     <div className={CELL} title={fees ? `Creator: ${fees.creator}` : undefined}>
       <Tag tone="muted">Fees</Tag><Q k="creatorFees" />
       <span className="text-muted-foreground">creator fees</span>
+      {fees?.none ? <span className="text-muted-foreground truncate" title={fees.none}>{fees.none}</span> : <>
       <span className={cn("font-mono tabular-nums", fees && fees.sol > 0 ? "text-ok" : "")}>{fees ? `${fees.sol.toFixed(chain.decimals)} ${chain.symbol}` : "–"}</span>
-      <span className="text-muted-foreground hidden sm:inline">unclaimed</span>
-      <span className="ml-auto inline-flex gap-1.5"><Button size="xs" variant="outline" onClick={claim} disabled={!fees || fees.sol <= 0 || !!busy}>{busy === "claim" ? "Claiming…" : "Claim"}</Button>{closeOutBtn}</span>
+      <span className="text-muted-foreground hidden sm:inline">unclaimed</span></>}
+      <span className="ml-auto inline-flex gap-1.5">{fees?.none ? null : <Button size="xs" variant="outline" onClick={claim} disabled={!fees || fees.sol <= 0 || !!busy}>{busy === "claim" ? "Claiming…" : "Claim"}</Button>}{closeOutBtn}</span>
     </div>
   ) : null
   const walletRows = wallets.length === 0 ? (

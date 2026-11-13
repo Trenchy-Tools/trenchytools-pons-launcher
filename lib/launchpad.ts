@@ -51,6 +51,8 @@ export type Launchpad = {
   vanitySuffix?: string | null
   /** the launchpad pays the creator and the API can claim it */
   creatorFees?: boolean
+  /** how the creator is paid when there is nothing to claim ("letsbonk pays creators nothing", "paid out automatically") */
+  feeNote?: string
   /** EVM: the creator names wallets that skip its launch-window tax (pons) */
   exemptList?: boolean
   /** EVM: seconds after the create before any other buy (Clanker's 20 s anti-snipe) */

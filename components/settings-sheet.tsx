@@ -62,7 +62,7 @@ export function SettingsSheet({ open, onClose, status, onSaved }: { open: boolea
           <p className="text-foreground font-medium">How your API key works</p>
           <p className="text-muted-foreground"><b className="text-foreground font-medium">Made by the TrenchyTools API</b>{DEMO ? ", for free, the first time you opened this app" : " (free)"} (<code>GET /api/create-api-key</code>). It tells the API which app is calling: your rate limit and your usage.</p>
           <p className="text-muted-foreground"><b className="text-foreground font-medium">It cannot touch your money.</b> It holds no wallets and no keys: the API only builds unsigned transactions, and this app checks and signs them with keys that stay {DEMO ? "in this browser" : "in your wallet folder"}. If someone copies it, they use your rate limit; they cannot trade from your wallets.</p>
-          <p className="text-muted-foreground"><b className="text-foreground font-medium">The fee: {+(chain.apiFeeRate * 100).toFixed(2)} % of each trade</b>, buys and sells, as a small {chain.symbol} transfer that comes with each trade you sign (you see it before every launch in the cost panel). Nothing else is charged: no subscription, no deposit.</p>
+          <p className="text-muted-foreground">{(chain as { feeText?: string }).feeText ?? <><b className="text-foreground font-medium">The fee: {+(chain.apiFeeRate * 100).toFixed(2)} % of each trade</b>, buys and sells, as a small {chain.symbol} transfer that comes with each trade you sign (you see it before every launch in the cost panel). Nothing else is charged: no subscription, no deposit.</>}</p>
         </div>
         {DEMO && s?.keyError && !s.apiKeyConfigured ? (
           <div className="flex flex-col gap-1">

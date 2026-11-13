@@ -15,7 +15,8 @@ import { SettingsSheet } from "./settings-sheet"
 import { type Status } from "./status-strip"
 import { ThemeToggle } from "./theme-toggle"
 
-const NAV = [
+/** The launchers' pages; a tool (the wallet mover) names its own in lib/chain.ts `nav`. */
+const NAV: Array<{ href: string; label: string }> = (chain as { nav?: Array<{ href: string; label: string }> }).nav ?? [
   { href: "/launch", label: "Launch" },
   { href: "/trading", label: "Trading" },
   { href: "/wallets", label: "Wallets" },

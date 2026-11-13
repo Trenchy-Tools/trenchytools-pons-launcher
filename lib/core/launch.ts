@@ -27,6 +27,7 @@ import { ApiError, type Expected, type Simulation, type TokenMetadata } from "..
 import { AppError } from "./errors"
 import { sendAll, waitSuccess } from "./evm"
 import { fundDirect } from "./funding"
+import { sellAll } from "./sell-all"
 import { notIn, type Env as BaseEnv } from "./env"
 import { chain } from "../chain"
 import { launchWalletLabel, type Role, type WalletInfo } from "./wallet-record"
@@ -136,6 +137,8 @@ export type LaunchRecord = {
   createdAt: string
   wallets: { dev: string; bundle: string[]; sniper: string[]; holder: string[]; volume?: string[] }
   hashes: { create?: string; bundle: string[]; snipers: string[]; holders: string[] }
+  /** the launchpad it was made on (lib/chain.ts launchpads id) */
+  pad?: string
   metadataUri?: string
   error?: string
 }
@@ -308,7 +311,7 @@ export function prepareLaunch(env: Env, form: LaunchForm): LaunchRecord {
   if (groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} bundle buyers; add the rest as later buyers`)
   env.wallets.assertBackedUp(dev.publicKey)
   const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
-  const rec: LaunchRecord = { id, name: form.name, symbol: form.symbol, token: null, status: "running", createdAt: new Date().toISOString(), wallets: { dev: dev.publicKey, bundle: [], sniper: [], holder: [] }, hashes: { bundle: [], snipers: [], holders: [] }, metadataUri: form.metadataUri || undefined }
+  const rec: LaunchRecord = { id, name: form.name, symbol: form.symbol, token: null, status: "running", createdAt: new Date().toISOString(), wallets: { dev: dev.publicKey, bundle: [], sniper: [], holder: [] }, hashes: { bundle: [], snipers: [], holders: [] }, pad: padOf(form).id, metadataUri: form.metadataUri || undefined }
   env.launches.save(rec)
   return rec
 }
@@ -395,7 +398,7 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     const stop = { sold: false }
     const selling = form.autoSell && autoSellArmed(form.autoSell) ? autoSell(env, rec, form.autoSell, token, emit, stop) : null
     if (form.claim && padFeatures(pad).creatorFees) void autoClaim(env, rec, token, form.claim, emit)
-    else if (form.claim) emit("claim", `Auto-claim skipped: ${PAD} creator fees are not claimable through the API yet`)
+    else if (form.claim) emit("claim", `Auto-claim skipped: ${pad.feeNote ?? `${PAD} pays no creator fees you can claim`}`)
     const volumeRun = volume.length ? volumeMaker(env, rec, form.volume!, token, emit, stop) : null
 
     if (snipers.length) {
@@ -501,25 +504,16 @@ async function sellEverything(env: Env, pk: string, token: string, emit: Emit, w
   }
 }
 
-/** All at once: build every sell (and read every account) first, then send them all in the same instant. */
+/** All at once, through the shared batch sell (lib/core/sell-all.ts): one slippage that covers the batch's own price
+ *  impact, then a second round for any wallet still holding. Only confirmed sells are reported as sold. */
 async function sellTogether(env: Env, list: Array<{ pk: string; who: string }>, token: string, emit: Emit): Promise<void> {
-  const ready = await Promise.all(list.map(async ({ pk, who }) => {
-    try {
-      const [b, acct] = await Promise.all([
-        env.api.evm.tradeLocal({ wallet: pk, action: "sell", token, amount: "100%", denominatedInEth: "false", slippage: Math.max(env.slippage, 25) }),
-        env.api.evm.account(pk),
-      ])
-      return { pk, who, b, acct }
-    } catch (e) { emit("warning", `${who} sell failed: ${errText(e)}`); return null }
-  }))
-  await Promise.all(ready.map(async (r) => {
-    if (!r) return
-    try {
-      let hash = ""
-      await sendAll(env.api, env.wallets.accountOf(r.pk), r.b.transactions, { confirm: false, pipeline: true, acct: r.acct, onStep: (label, h) => { if (label === "sell") hash = h } })
-      emit("autosell", `${r.who} sold everything (${hash.slice(0, 12)}…)`, { hash })
-    } catch (e) { emit("warning", `${r.who} sell failed: ${errText(e)}`) }
-  }))
+  const who = new Map(list.map((x) => [x.pk.toLowerCase(), x.who]))
+  const results = await sellAll(env, list.map((x) => x.pk), token, 100)
+  for (const r of results) {
+    const name = who.get(r.publicKey.toLowerCase()) ?? r.publicKey.slice(0, 8)
+    if ("hash" in r) emit("autosell", `${name} sold everything${r.retried ? " (second try)" : ""}${r.confirmed ? "" : ", not confirmed yet"} (${r.hash.slice(0, 12)}…)`, { hash: r.hash })
+    else if ("error" in r && r.error) emit("warning", `${name} sell failed: ${r.error}`)
+  }
 }
 
 /** Auto-sell (see AutoSell): check every 3 s; the buyers and the main wallet's own trigger share one outside-money reading per tick. */
@@ -628,6 +622,16 @@ async function volumeMaker(env: Env, rec: LaunchRecord, v: Volume, token: string
   emit("volume", `Volume wallets sold out. Their ${SYM} stays in them: press Collect all on the Wallets page to bring it back to the main wallet.`)
 }
 
+/** Where a coin's creator fees live: its creator, its pad (from our launch record; the API detects it otherwise) and the
+ *  create transaction (pools.trade pays through a position minted in it). `none` = the pad pays nothing to claim. */
+export function claimTarget(env: Env, token: string): { creator: string | null; pad: Launchpad | null; at: { venue?: string; launchTx?: string }; none: string | null } {
+  const rec = env.launches.list().find((l) => same(l.token ?? "", token))
+  const pad = rec?.pad ? padById(rec.pad) : null
+  const at = { ...(pad ? { venue: pad.body?.venue as string | undefined ?? pad.id } : {}), ...(pad?.id === "pools-trade" && rec?.hashes.create ? { launchTx: rec.hashes.create } : {}) }
+  const none = pad && !padFeatures(pad).creatorFees ? pad.feeNote ?? `${pad.name} pays no creator fees you can claim` : null
+  return { creator: rec?.wallets.dev ?? null, pad, at, none }
+}
+
 /** Auto-claim (see AutoClaim), once. A failed claim is tried twice more, a minute apart. */
 async function autoClaim(env: Env, rec: LaunchRecord, token: string, c: AutoClaim, emit: Emit): Promise<void> {
   const creator = rec.wallets.dev
@@ -651,12 +655,13 @@ async function autoClaim(env: Env, rec: LaunchRecord, token: string, c: AutoClai
   }
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const fees = await env.api.evm.creatorFees(creator, token)
-      const total = fees.eth + (fees.curve?.pendingEth ?? 0)
+      const { at } = claimTarget(env, token)
+      const fees = await env.api.evm.creatorFees(creator, token, at)
+      const total = fees.eth   // the API's `eth` = what this claim pays now (pons: the escrow + the curve it sweeps)
       if (total <= 0) { emit("claim", "No creator fees to claim"); return }
-      const b = await env.api.evm.tradeLocal({ wallet: creator, action: "collectCreatorFee", token })
+      const b = await env.api.evm.tradeLocal({ wallet: creator, action: "collectCreatorFee", token, ...at })
       let hash = ""
-      await sendAll(env.api, env.wallets.accountOf(creator), b.transactions, { confirm: true, onStep: (label, h) => { if (label === "claim") hash = h } })
+      await sendAll(env.api, env.wallets.accountOf(creator), b.transactions, { confirm: true, onStep: (label, h) => { if (label === "claim" || (label === "collect" && !hash)) hash = h } })
       emit("claim", `Claimed about ${total.toFixed(5)} ${SYM} of creator fees into the creator wallet (${hash.slice(0, 12)}…)`, { hash })
       return
     } catch (e) {

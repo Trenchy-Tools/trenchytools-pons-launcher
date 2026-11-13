@@ -35,12 +35,11 @@ export const LAUNCHERS: SuiteItem[] = [
   { id: "base", name: "Base", sub: "Clanker", url: "https://base.trenchy.tools", repo: `${ORG}/trenchytools-base-launcher`, logo: "/logos/chains/base.svg", status: "live" },
   { id: "eth", name: "Ethereum", sub: "Sender · Stockereum", url: "https://eth.trenchy.tools", repo: `${ORG}/trenchytools-eth-launcher`, logo: "/logos/chains/ethereum.svg", status: "live" },
   { id: "arc", name: "Arc", sub: "Tolly · Argus · pools.trade", url: "https://arc.trenchy.tools", repo: `${ORG}/trenchytools-arc-launcher`, logo: "/logos/chains/arc.png", status: "live" },
-  // private for now (the user's call): no hosted page or public repo yet
-  { id: "elysium", name: "Elysium", sub: "Montra · Ascend · Volta · BOXA", url: null, repo: null, logo: "/logos/chains/elysium.svg", status: "soon" },
+  { id: "elysium", name: "Elysium", sub: "Montra · Ascend · Volta · BOXA", url: "https://elysium.trenchy.tools", repo: `${ORG}/trenchytools-elysium-launcher`, logo: "/logos/chains/elysium.svg", status: "live" },
 ]
 
 export const TOOLS: SuiteItem[] = [
-  { id: "mover", name: "Wallet mover", sub: "fund, sweep and route wallets on every chain", url: "https://mover.trenchy.tools", repo: `${ORG}/trenchytools-wallet-mover`, logo: "/logos/chains/solana.svg", status: "live" },
+  { id: "mover", name: "Wallet mover", sub: "move SOL and ETH between wallets and chains", url: "https://mover.trenchy.tools", repo: `${ORG}/trenchytools-wallet-mover`, logo: "/logos/tools/mover.svg", status: "live" },
 ]
 
 export const suiteItem = (id: string): SuiteItem | undefined => [...LAUNCHERS, ...TOOLS].find((x) => x.id === id)

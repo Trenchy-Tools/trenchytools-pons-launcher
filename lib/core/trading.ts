@@ -9,13 +9,9 @@
 import { chain } from "../chain"
 import { sendAll, waitSuccess } from "./evm"
 import type { Env } from "./launch"
-import { TOTAL_SUPPLY } from "./launch"
+import { TOTAL_SUPPLY, claimTarget } from "./launch"
 import type { Expected, TokenInfo } from "../trenchy"
 import { same, type WalletInfo } from "./wallet-record"
-
-/** Sell all builds this many wallets' sells per burst (the API allows 25 requests a second per key) */
-const SELL_WAVE = 10
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export type Holding = WalletInfo & { eth: number; tokens: number; raw: string }
 
@@ -75,61 +71,7 @@ export async function buy(env: Env, publicKey: string, token: string, eth: numbe
   return { publicKey, hash, hashes, action: "buy", expected: built.expected, confirmed }
 }
 
-export type SellAllResult = Array<TradeResult | { publicKey: string; skipped?: string; error?: string; code?: string }>
-
-/**
- * Sell `percent` from each wallet at the same instant: 1. build every sell and read every wallet's account first (in
- * waves of SELL_WAVE), 2. send them all together ([approve] sell fee per wallet, back to back), 3. confirm them together.
- * Wallets holding none are skipped.
- */
-export async function sellAll(env: Env, publicKeys: string[], token: string, percent: number): Promise<SellAllResult> {
-  const api = env.api
-  const rows = await api.evm.walletBalances(publicKeys, token)
-  const held = new Map(rows.map((r) => [r.wallet.toLowerCase(), r.raw]))
-  const pct = Math.max(1, Math.min(100, Math.round(percent)))
-  const out: SellAllResult = new Array(publicKeys.length)
-  const fail = (i: number, e: unknown) => { out[i] = { publicKey: publicKeys[i], error: e instanceof Error ? e.message : String(e), code: (e as { code?: string })?.code } }
-  const waves = <T,>(xs: T[], n: number) => Array.from({ length: Math.ceil(xs.length / n) }, (_, k) => xs.slice(k * n, k * n + n))
-
-  // 1. build every sell + read every account
-  type Ready = { i: number; pk: string; built: Awaited<ReturnType<typeof api.evm.tradeLocal>>; acct: Awaited<ReturnType<typeof api.evm.account>> }
-  const ready: Ready[] = []
-  const todo = publicKeys.map((pk, i) => ({ pk, i })).filter(({ pk, i }) => {
-    if ((held.get(pk.toLowerCase()) ?? "0") !== "0") return true
-    out[i] = { publicKey: pk, skipped: "holds none" }
-    return false
-  })
-  for (const wave of waves(todo, SELL_WAVE)) {
-    await Promise.all(wave.map(async ({ pk, i }) => {
-      try {
-        env.wallets.accountOf(pk) // the key must be backed up: NotBackedUpError otherwise
-        const [built, acct] = await Promise.all([
-          api.evm.tradeLocal({ wallet: pk, action: "sell", token, amount: `${pct}%`, denominatedInEth: "false", slippage: env.slippage }),
-          api.evm.account(pk),
-        ])
-        ready.push({ i, pk, built, acct })
-      } catch (e) { fail(i, e) }
-    }))
-  }
-
-  // 2. send them all in the same instant
-  const sent: Array<Ready & { hash: string; hashes: string[] }> = []
-  await Promise.all(ready.map(async (r) => {
-    try {
-      let hash = ""
-      const hashes = await sendAll(api, env.wallets.accountOf(r.pk), r.built.transactions, { confirm: false, pipeline: true, acct: r.acct, onStep: (label, h) => { if (label === "sell") hash = h } })
-      sent.push({ ...r, hash: hash || hashes[0], hashes })
-    } catch (e) { fail(r.i, e) }
-  }))
-
-  // 3. confirm them together (the status checks are batched into one request per poll)
-  await Promise.all(sent.map(async (r) => {
-    let confirmed = false
-    try { confirmed = await waitSuccess(api, r.hash, 30_000) } catch (e) { fail(r.i, e); return }
-    out[r.i] = { publicKey: r.pk, hash: r.hash, hashes: r.hashes, action: "sell", expected: r.built.expected, confirmed }
-  }))
-  return out
-}
+export { sellAll, type SellAllResult } from "./sell-all"
 
 export type Pnl = {
   spent: number; received: number; net: number; trades: number; truncated: boolean
@@ -192,19 +134,23 @@ export function creatorOf(env: Env, token: string): string | null {
 
 /** The coin's creator and what it can claim: the escrow now + what the coin's curve still holds. `sol` carries the ETH under the name the shared Trading page reads. */
 export async function creatorFees(env: Env, token: string) {
-  const creator = creatorOf(env, token) ?? (await env.api.evm.token(token)).creator
-  const f = await env.api.evm.creatorFees(creator, token)
-  const total = +(f.eth + (f.curve?.pendingEth ?? 0)).toFixed(9)
+  const t = claimTarget(env, token)
+  const creator = t.creator ?? creatorOf(env, token) ?? (await env.api.evm.token(token)).creator
+  if (t.none) return { creator, sol: 0, eth: 0, claimableEth: 0, pendingEth: 0, sweepable: false, reason: undefined, none: t.none }
+  const f = await env.api.evm.creatorFees(creator, token, t.at)
+  const total = +f.eth.toFixed(9)   // what one claim pays now (the API's `eth` already includes the curve it sweeps)
   return { creator, sol: total, eth: total, claimableEth: f.claimableEth, pendingEth: f.curve?.pendingEth ?? 0, sweepable: f.curve?.sweepable ?? false, reason: f.curve?.reason }
 }
 
 /** Claim them: trade-local { action: "collectCreatorFee", token } → [sweep] claim, signed and sent in order by the creator. */
 export async function collectCreatorFees(env: Env, token: string): Promise<{ creator: string; signature: string; hash: string; hashes: string[]; confirmed: boolean }> {
-  const creator = creatorOf(env, token) ?? (await env.api.evm.token(token)).creator
+  const t = claimTarget(env, token)
+  if (t.none) throw new Error(t.none)
+  const creator = t.creator ?? creatorOf(env, token) ?? (await env.api.evm.token(token)).creator
   const account = env.wallets.accountOf(creator) // the creator's key must be stored and backed up here
-  const built = await env.api.evm.tradeLocal({ wallet: creator, action: "collectCreatorFee", token })
+  const built = await env.api.evm.tradeLocal({ wallet: creator, action: "collectCreatorFee", token, ...t.at })
   let claim = ""
-  const hashes = await sendAll(env.api, account, built.transactions, { confirm: true, onStep: (label, h) => { if (label === "claim") claim = h } })
+  const hashes = await sendAll(env.api, account, built.transactions, { confirm: true, onStep: (label, h) => { if (label === "claim" || (label === "collect" && !claim)) claim = h } })
   const hash = claim || hashes[hashes.length - 1]
   return { creator, signature: hash, hash, hashes, confirmed: true }
 }

@@ -162,6 +162,13 @@ export default function TradingPage() {
     if (chain.features.creatorFees) get<Fees>(`/api/trading/creator-fees?${q(coin)}`).then(setFees).catch(() => setFees(null))
   }, [coin, valid]) // eslint-disable-line react-hooks/exhaustive-deps
   React.useEffect(() => { void load() }, [load])
+  /** Wallets and balances read NOW (and shown): what Sell all goes by, so a wallet that bought a moment ago is included. */
+  const freshRows = async () => {
+    const [f, b] = await Promise.all([get<{ wallets: Wallet[]; mainWallet: string | null }>("/api/wallets"), get<{ rows: Row[] }>(`/api/wallets/balances?${q(coin)}`)])
+    const map = new Map(b.rows.map((r) => [r.publicKey.toLowerCase(), r]))
+    setWallets(f.wallets); setMain(f.mainWallet); setRows(map); setRowsCoin(coin)
+    return { wallets: f.wallets, main: f.mainWallet, rows: map }
+  }
 
   // the coin: name, symbol, venue, flags; remembered for the Wallets page's balance column
   React.useEffect(() => {
@@ -275,11 +282,16 @@ export default function TradingPage() {
     refreshAfter()
   })
   const sellAll = (percent: number) => run(`sellall:${percent}`, async () => {
-    const holders = bulkTargets.filter(held)
+    // balances read at the press: a wallet that bought since the page last looked (a later buyer, a volume wallet) sells too
+    const now = await freshRows().catch(() => null)
+    const tokensOf = (pk: string) => (now ? now.rows.get(pk.toLowerCase())?.tokens : row(pk)?.tokens) ?? 0
+    const low = (pk: string) => ((now ? now.rows.get(pk.toLowerCase())?.native : row(pk)?.native) ?? 0) < chain.minGas
+    const everyone = now ? now.wallets.filter((w) => includeDev || w.publicKey !== now.main).map((w) => w.publicKey) : bulkTargets
+    const holders = everyone.filter((pk) => tokensOf(pk) > 0)
     if (holders.length === 0) throw { error: "No wallet holds this coin" }
     // wallets that cannot pay the fee are left out and offered a top-up; the rest sell now
-    const starved = holders.filter(lowGas)
-    const targets = holders.filter((pk) => !lowGas(pk))
+    const starved = holders.filter(low)
+    const targets = holders.filter((pk) => !low(pk))
     if (starved.length) askTopUp(starved, `sell ${percent}%`, async () => {
       const r = await post<{ results: Result[] }>("/api/trading/sell-all", { publicKeys: starved, [cp]: coin, percent })
       report(`Sell ${percent}% (topped up)`, r.results, true)
@@ -313,7 +325,8 @@ export default function TradingPage() {
     })
   }
   const addTimer = () => run("timer", async () => {
-    const targets = bulkTargets.filter(held)
+    const now = await freshRows().catch(() => null)
+    const targets = now ? now.wallets.filter((w) => includeDev || w.publicKey !== now.main).map((w) => w.publicKey).filter((pk) => (now.rows.get(pk.toLowerCase())?.tokens ?? 0) > 0) : bulkTargets.filter(held)
     if (targets.length === 0) throw { error: "No wallet holds this coin yet" }
     await post("/api/trading/timers", { [cp]: coin, publicKeys: targets, percent: Number(timerPct) || 100, minutes: Number(timerMin) || 0 })
     toast({ tone: "ok", title: `Set: sell ${timerPct}% from ${targets.length} wallet${targets.length === 1 ? "" : "s"} in ${timerMin} min`, detail: DEMO ? TAB_NOTE : "Kept in the server's memory; a restart forgets it." })
@@ -361,9 +374,12 @@ export default function TradingPage() {
 
   const sellLeftRaw = async () => {
     // close out: a holder that cannot pay the fee gets a small top-up first (it comes back with the sweep)
-    const starved = holdersLeft.map((w) => w.publicKey).filter(lowGas)
+    const now = await freshRows().catch(() => null)
+    const left = now ? runWallets.map((w) => w.publicKey).filter((pk) => (now.rows.get(pk.toLowerCase())?.tokens ?? 0) > 0) : holdersLeft.map((w) => w.publicKey)
+    const starved = left.filter((pk) => ((now ? now.rows.get(pk.toLowerCase())?.native : row(pk)?.native) ?? 0) < chain.minGas)
     if (starved.length) await topUp(starved)
-    const r = await post<{ results: Result[] }>("/api/trading/sell-all", { publicKeys: holdersLeft.map((w) => w.publicKey), [cp]: coin, percent: 100 })
+    if (!left.length) return
+    const r = await post<{ results: Result[] }>("/api/trading/sell-all", { publicKeys: left, [cp]: coin, percent: 100 })
     report("Sell what is left", r.results)
   }
   const closeAccountsRaw = async () => {
@@ -422,12 +438,12 @@ export default function TradingPage() {
     try { const k = `closeout:${coin}`; if (window.sessionStorage.getItem(k)) return; window.sessionStorage.setItem(k, "1") } catch { /* storage blocked: open anyway */ }
     setCloseOpen(true)
   }, [valid, coin, rowsCoin, runWallets.length, holdersLeft.length])
-  // while the run's wallets hold the coin, re-read balances every 20 s so a sell-out elsewhere (auto-sell, another tab) is seen
+  // re-read balances every 15 s while the page is open: later buyers, auto-sell and other tabs change them behind this page
   React.useEffect(() => {
-    if (!valid || !holdersLeft.length) return
-    const t = setInterval(() => void load(), 20_000)
+    if (!valid) return
+    const t = setInterval(() => { if (document.visibilityState === "visible") void load() }, 15_000)
     return () => clearInterval(t)
-  }, [valid, holdersLeft.length, load])
+  }, [valid, load])
 
   const pendingTimers = timers.filter((t) => t.status === "pending" || t.status === "running").length
   const badges: React.ReactNode[] = []

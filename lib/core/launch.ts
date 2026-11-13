@@ -363,7 +363,7 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     // most launchpads let the API predict the coin; the rest (Ascend, a Volta CREATE) are read from the receipt below
     let token = built.predicted?.token ?? ""
     if (token) { rec.token = token; saveLaunch(rec) }
-    emit("mint", `${token ? `Coin will be ${token}` : "The coin's address comes from the create's receipt"} (${PAD} launch fee ${built.launchFeeEth ?? 0} ${SYM}${form.devBuySol > 0 ? `, the dev buy gets ~${Math.round(built.expected.tokens).toLocaleString()} tokens` : ""})`, { token })
+    emit("mint", `${token ? `Coin will be ${token}` : "The coin's address comes from the create's receipt"} (${PAD} launch fee ${built.launchFeeEth ?? 0} ${SYM}${form.devBuySol > 0 && built.expected.tokens > 0 ? `, the dev buy gets ~${Math.round(built.expected.tokens).toLocaleString()} tokens` : ""})`, { token })
     const hashes = await sendAll(api, env.wallets.accountOf(rec.wallets.dev), built.transactions, { confirm: false, acct: devAcct })
     const createHash = hashes[built.transactions.findIndex((t) => t.label === "create")] ?? hashes[0]
     rec.hashes.create = createHash
@@ -701,6 +701,6 @@ export async function simulateLaunch(env: Env, form: LaunchForm): Promise<Simula
   const built = await api.evm.tradeLocal({ wallet: creator.publicKey, action: "create", tokenMetadata: metadataOf({ ...form, name: form.name || "Simulation", symbol: form.symbol || "SIM" }, form.image || "https://trenchy.tools/og.png"), amount: form.devBuySol, ...(exempt.length ? { exemptWallets: exempt } : {}), slippage: form.slippage, ...(form.venueOptions ?? {}) })
   const simulation = await api.evm.simulate(built.transactions)
   const failed = simulation.steps.find((s) => !s.ok)
-  checks.push({ name: "simulation", ok: simulation.ok, detail: simulation.ok ? `create + dev buy simulates fine (${simulation.steps.map((s) => s.label).join(", ")}${form.devBuySol > 0 ? `, ~${Math.round(built.expected.tokens).toLocaleString()} tokens for ${form.devBuySol} ${SYM}` : ""}; coin would be ${built.predicted?.token ?? "?"})` : `simulation failed at ${failed?.label ?? "a step"}: ${failed?.error ?? "reverted"}` })
+  checks.push({ name: "simulation", ok: simulation.ok, detail: simulation.ok ? `create + dev buy simulates fine (${simulation.steps.map((s) => s.label).join(", ")}${form.devBuySol > 0 ? (built.expected.tokens > 0 ? `, ~${Math.round(built.expected.tokens).toLocaleString()} tokens for ${form.devBuySol} ${SYM}` : `, dev buy ${form.devBuySol} ${SYM}`) : ""}; coin would be ${built.predicted?.token ?? "?"})` : `simulation failed at ${failed?.label ?? "a step"}: ${failed?.error ?? "reverted"}` })
   return { ok: checks.every((c) => c.ok), checks, plan, simulation, expected: built.expected, quote: plan.quote }
 }

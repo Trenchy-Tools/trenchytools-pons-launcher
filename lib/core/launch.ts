@@ -28,6 +28,7 @@ import { AppError } from "./errors"
 import { sendAll, waitSuccess } from "./evm"
 import { fundDirect } from "./funding"
 import { sellAll } from "./sell-all"
+import { startAutomation, type Handle, type SavedAutomation } from "../automations"
 import { notIn, type Env as BaseEnv } from "./env"
 import { chain } from "../chain"
 import { launchWalletLabel, type Role, type WalletInfo } from "./wallet-record"
@@ -139,6 +140,8 @@ export type LaunchRecord = {
   hashes: { create?: string; bundle: string[]; snipers: string[]; holders: string[] }
   /** the launchpad it was made on (lib/chain.ts launchpads id) */
   pad?: string
+  /** what the launch keeps running after the coin is live (lib/automations.ts), as last saved */
+  automations?: SavedAutomation[]
   metadataUri?: string
   error?: string
 }
@@ -412,15 +415,20 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     }
     if (holders.length) {
       emit("holders", `${holders.length} later buy(s) of ${amounts(holders)} after ${form.holders.delayS}s, spread over ${form.holders.windowS}s`)
-      await sleep(form.holders.delayS * 1000)
+      const hl = automation(env, rec, token, { kind: "later", title: "Later buyers", rule: `${holders.length} wallet${holders.length === 1 ? " buys" : "s buy one by one"}, starting ${form.holders.delayS}s after the launch, spread over ${form.holders.windowS}s`, progress: { done: 0, total: holders.length } })
+      hl.set({ nextAt: Date.now() + form.holders.delayS * 1000 })
+      let going = await hl.sleep(form.holders.delayS * 1000)
       const times = holders.map(() => Math.random() * form.holders.windowS * 1000).sort((a, b) => a - b)
-      const t0 = Date.now()
       for (const [i, w] of holders.entries()) {
-        await sleep(Math.max(0, t0 + times[i] - Date.now()))
+        const gap = times[i] - (i ? times[i - 1] : 0)
+        if (going) { hl.set({ status: "running", nextAt: Date.now() + gap }); going = await hl.sleep(gap) }
+        if (!going) { emit("holders", `Later buyers stopped by you: ${holders.length - i} buy(s) not made`); break }
         if (stop.sold) { emit("holders", `Auto-sell has sold: the ${holders.length - i} later buy(s) still to come are skipped`); break }
         const h = await oneBuy(env, token, w, w.amount, form.slippage, emit, "holder")
         if (h) rec.hashes.holders.push(h)
+        hl.set({ progress: { done: i + 1, total: holders.length } })
       }
+      hl.finish(`${hl.a.progress?.done ?? 0} of ${holders.length} bought`)
       saveLaunch(rec)
     }
     if (selling) await selling
@@ -526,13 +534,15 @@ async function autoSell(env: Env, rec: LaunchRecord, a: AutoSell, token: string,
     return reading.net
   }
   const rule = (netIn: number, afterMin: number) => [netIn > 0 ? `outside buyers put in ${netIn} ${SYM}` : "", afterMin > 0 ? `${afterMin} min pass` : ""].filter(Boolean).join(" or ")
-  const watch = async (netIn: number, afterMin: number, who: string): Promise<string> => {
+  const watch = async (netIn: number, afterMin: number, who: string, h: Handle): Promise<string | null> => {
     let lastNote = 0
     for (;;) {
-      await sleep(3000)
-      if (afterMin > 0 && Date.now() - t0 >= afterMin * 60_000) return `${afterMin} min passed`
+      if (!(await h.sleep(3000))) return null   // Stop was pressed
+      if (afterMin > 0 && Date.now() - t0 - h.pausedMs >= afterMin * 60_000) return `${afterMin} min passed`
       if (netIn > 0) {
         const net = await netNow()
+        if (h.stopped) return null
+        if (net !== null) h.set({ note: `outside buyers ${net >= 0 ? "+" : ""}${net.toFixed(4)} of ${netIn} ${SYM}` })
         if (net !== null && net >= netIn) return `outside buyers put in ${net.toFixed(4)} ${SYM}`
         if (net !== null && Date.now() - lastNote > 30_000) { lastNote = Date.now(); emit("autosell", `Watching (${who}): outside buyers ${net >= 0 ? "+" : ""}${net.toFixed(4)} of ${netIn} ${SYM}`) }
       }
@@ -542,16 +552,25 @@ async function autoSell(env: Env, rec: LaunchRecord, a: AutoSell, token: string,
   const mainNetIn = a.mainNetIn ?? 0
   const mainAfterMin = a.mainAfterMin ?? 0
   const mainOwn = a.main === "own" && (mainNetIn > 0 || mainAfterMin > 0)
+  const hb = buyersArmed ? automation(env, rec, token, { kind: "autosell", title: "Auto-sell", rule: `${a.main === "with" ? "Every wallet sells" : "The buyer wallets sell"} everything when ${rule(a.netIn, a.afterMin)}`, endsAt: a.afterMin > 0 ? t0 + a.afterMin * 60_000 : undefined }) : null
+  const hm = mainOwn ? automation(env, rec, token, { kind: "autosell-main", title: "Auto-sell · main wallet", rule: `The main wallet sells everything when ${rule(mainNetIn, mainAfterMin)}`, endsAt: mainAfterMin > 0 ? t0 + mainAfterMin * 60_000 : undefined }) : null
   emit("autosell", `Auto-sell armed: ${[buyersArmed ? `buyer wallets sell when ${rule(a.netIn, a.afterMin)}` : "", mainOwn ? `the main wallet sells when ${rule(mainNetIn, mainAfterMin)}` : ""].filter(Boolean).join("; ")}`)
   const label = (pk: string) => env.wallets.get(pk)?.label ?? pk.slice(0, 10)
 
   const mainOwnRun = mainOwn
-    ? watch(mainNetIn, mainAfterMin, "main wallet").then(async (why) => { emit("autosell", `Main wallet selling: ${why}`); await sellEverything(env, rec.wallets.dev, token, emit, "Main wallet") })
+    ? watch(mainNetIn, mainAfterMin, "main wallet", hm!).then(async (why) => {
+        if (why === null) { emit("autosell", "Main wallet auto-sell stopped by you"); hm!.finish("stopped by you"); return }
+        hm!.set({ status: "running", note: "selling…" })
+        emit("autosell", `Main wallet selling: ${why}`); await sellEverything(env, rec.wallets.dev, token, emit, "Main wallet")
+        hm!.finish(`sold: ${why}`)
+      })
     : null
 
-  if (buyersArmed) {
-    const why = await watch(a.netIn, a.afterMin, "buyers")
+  const why = buyersArmed ? await watch(a.netIn, a.afterMin, "buyers", hb!) : null
+  if (buyersArmed && why === null) { emit("autosell", "Auto-sell stopped by you: the buyer wallets keep their coins"); hb!.finish("stopped by you") }
+  if (why !== null) {
     stop.sold = true
+    hb!.set({ status: "running", note: "selling…" })
     const buyers = [...rec.wallets.bundle, ...rec.wallets.sniper, ...rec.wallets.holder]
     emit("autosell", `Selling: ${why}`)
     const together = a.bundle === "all" || buyers.length < 2
@@ -563,6 +582,7 @@ async function autoSell(env: Env, rec: LaunchRecord, a: AutoSell, token: string,
     }
     await main
     if (a.main === "later") { await sleep(Math.max(1, a.mainLaterSec) * 1000); await sellEverything(env, rec.wallets.dev, token, emit, "Main wallet") }
+    hb!.finish(`sold: ${why}`)
   }
   await mainOwnRun
   emit("autosell", a.main === "keep" ? "Auto-sell done; the main wallet keeps its coins" : "Auto-sell done")
@@ -574,6 +594,8 @@ async function volumeMaker(env: Env, rec: LaunchRecord, v: Volume, token: string
   const [lo, hi] = VOLUME_PACE[v.pace] ?? VOLUME_PACE.normal
   const size = VOLUME_SIZE[v.size ?? "normal"] ?? VOLUME_SIZE.normal
   const end = Date.now() + Math.max(1, v.minutes) * 60_000
+  const hv = automation(env, rec, token, { kind: "volume", title: "Volume maker", rule: `${ws.length} wallet${ws.length === 1 ? "" : "s"} buy and sell small amounts for up to ${v.minutes} min (${v.pace} pace, ${v.size ?? "normal"} trades)`, endsAt: end })
+  hv.set({ status: "running" })
   emit("volume", `Volume maker on (${v.size ?? "normal"} trades): ${ws.length} wallets trade ${v.budget} ${SYM} between them for up to ${v.minutes} min. It stops early when the main wallet sells out or auto-sell fires.`)
   const run = { dir: "buy" as "buy" | "sell", left: 0 }
   let why = ""
@@ -581,9 +603,9 @@ async function volumeMaker(env: Env, rec: LaunchRecord, v: Volume, token: string
   let mainHad = false
   let fails = 0
   while (!why) {
-    await sleep(size.runs && Math.random() < 0.2 ? 300 + Math.random() * 500 : lo + Math.random() * (hi - lo))
+    if (!(await hv.sleep(size.runs && Math.random() < 0.2 ? 300 + Math.random() * 500 : lo + Math.random() * (hi - lo)))) { why = "you stopped it"; break }
     if (stop.sold) { why = "auto-sell fired"; break }
-    if (Date.now() >= end) { why = `${v.minutes} min passed`; break }
+    if (Date.now() >= end + hv.pausedMs) { why = `${v.minutes} min passed`; break }
     const rows = await env.api.evm.walletBalances([rec.wallets.dev, ...ws], token).catch(() => null)
     if (!rows) continue
     const by = new Map(rows.map((r) => [r.wallet.toLowerCase(), r]))
@@ -610,6 +632,7 @@ async function volumeMaker(env: Env, rec: LaunchRecord, v: Volume, token: string
         : await env.api.evm.tradeLocal({ wallet: pk, action: "buy", token, amount: +Math.max(MIN_BUY, spend(pk) * between(size.buy) / (1 + API_FEE)).toFixed(6), denominatedInEth: "true", slippage: Math.max(env.slippage, 25) })
       await sendAll(env.api, env.wallets.accountOf(pk), b.transactions, { confirm: false, pipeline: true })
       trades++
+      hv.set({ note: `${trades} trade${trades === 1 ? "" : "s"} so far` })
       fails = 0
       if (trades % 10 === 0) emit("volume", `Volume maker: ${trades} trades so far`)
     } catch (e) {
@@ -619,7 +642,20 @@ async function volumeMaker(env: Env, rec: LaunchRecord, v: Volume, token: string
   emit("volume", `Volume maker stopped: ${why} (${trades} trades). The volume wallets now sell what they hold…`)
   const rows = await env.api.evm.walletBalances(ws, token).catch(() => [])
   await sellTogether(env, rows.filter((r) => r.tokens > 0).map((r) => ({ pk: r.wallet, who: `Volume wallet ${r.wallet.slice(0, 8)}…` })), token, emit)
+  hv.finish(`${why} · ${trades} trade${trades === 1 ? "" : "s"}`, why === "you stopped it" ? "stopped" : "done")
   emit("volume", `Volume wallets sold out. Their ${SYM} stays in them: press Collect all on the Wallets page to bring it back to the main wallet.`)
+}
+
+/** One running part of a launch, for the Trading page (lib/automations.ts). Its state goes into the launch record as it changes. */
+function automation(env: Env, rec: LaunchRecord, coin: string, init: Omit<Parameters<typeof startAutomation>[0], "launchId" | "coin">): Handle {
+  return startAutomation({ launchId: rec.id, coin, ...init }, (a) => {
+    const list = (rec.automations ??= [])
+    const saved: SavedAutomation = { id: a.id, kind: a.kind, title: a.title, rule: a.rule, status: a.status, result: a.result }
+    const i = list.findIndex((x) => x.id === a.id)
+    if (i >= 0 && list[i].status === saved.status && list[i].result === saved.result) return
+    if (i < 0) list.push(saved); else list[i] = saved
+    env.launches.save(rec)
+  })
 }
 
 /** Where a coin's creator fees live: its creator, its pad (from our launch record; the API detects it otherwise) and the
@@ -635,16 +671,19 @@ export function claimTarget(env: Env, token: string): { creator: string | null; 
 /** Auto-claim (see AutoClaim), once. A failed claim is tried twice more, a minute apart. */
 async function autoClaim(env: Env, rec: LaunchRecord, token: string, c: AutoClaim, emit: Emit): Promise<void> {
   const creator = rec.wallets.dev
+  const hc = automation(env, rec, token, { kind: "claim", title: "Auto-claim", rule: c.when === "after" ? `Creator fees are claimed ${c.afterMin} min after the launch` : "Creator fees are claimed once every one of your wallets has sold", endsAt: c.when === "after" ? Date.now() + Math.max(1, c.afterMin) * 60_000 : undefined })
+  const over = (result: string) => { hc.finish(result) }
+  const stopped = () => { emit("claim", "Auto-claim stopped by you"); over("stopped by you") }
   if (c.when === "after") {
     emit("claim", `Auto-claim on: the creator fees are claimed ${c.afterMin} min after the launch`)
-    await sleep(Math.max(1, c.afterMin) * 60_000)
+    if (!(await hc.sleep(Math.max(1, c.afterMin) * 60_000))) return stopped()
   } else {
     emit("claim", "Auto-claim on: the creator fees are claimed once every one of your wallets has sold the coin")
     const ours = [...ourWallets(rec)]
     let held = false
     for (const end = Date.now() + 6 * 3600_000; ; ) {
-      if (Date.now() > end) { emit("claim", "Auto-claim stopped: your wallets still hold the coin after 6 h. Claim on the Trading page when you are done."); return }
-      await sleep(15_000)
+      if (Date.now() > end) { emit("claim", "Auto-claim stopped: your wallets still hold the coin after 6 h. Claim on the Trading page when you are done."); return over("your wallets still held the coin after 6 h") }
+      if (!(await hc.sleep(15_000))) return stopped()
       const rows = await env.api.evm.walletBalances(ours, token).catch(() => null)
       if (!rows) continue
       const any = rows.some((r) => r.tokens > 0)
@@ -652,23 +691,25 @@ async function autoClaim(env: Env, rec: LaunchRecord, token: string, c: AutoClai
       else if (held) break
     }
     emit("claim", "Every wallet has sold: claiming the creator fees…")
+    hc.set({ status: "running", note: "claiming…" })
   }
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const { at } = claimTarget(env, token)
       const fees = await env.api.evm.creatorFees(creator, token, at)
       const total = fees.eth   // the API's `eth` = what this claim pays now (pons: the escrow + the curve it sweeps)
-      if (total <= 0) { emit("claim", "No creator fees to claim"); return }
+      if (total <= 0) { emit("claim", "No creator fees to claim"); return over("nothing to claim") }
       const b = await env.api.evm.tradeLocal({ wallet: creator, action: "collectCreatorFee", token, ...at })
       let hash = ""
       await sendAll(env.api, env.wallets.accountOf(creator), b.transactions, { confirm: true, onStep: (label, h) => { if (label === "claim" || (label === "collect" && !hash)) hash = h } })
       emit("claim", `Claimed about ${total.toFixed(5)} ${SYM} of creator fees into the creator wallet (${hash.slice(0, 12)}…)`, { hash })
-      return
+      return over("claimed")
     } catch (e) {
       emit("warning", `Auto-claim try ${attempt}/3: ${errText(e)}`)
       if (attempt < 3) await sleep(60_000)
     }
   }
+  over("the claim failed 3 times")
 }
 
 // ── simulate ────────────────────────────────────────────────────────────────

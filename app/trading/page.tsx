@@ -15,6 +15,7 @@
 import * as React from "react"
 import { Check, RefreshCw } from "lucide-react"
 import { Chart } from "@/components/chart"
+import { AutomationsPanel } from "@/components/automations-panel"
 import { FailureBox } from "@/components/failure"
 import { Button } from "@/components/ui/button"
 import { BrandIcon } from "@/components/ui/brand"
@@ -543,21 +544,8 @@ export default function TradingPage() {
       })}
     </>
   )
-  const timersBox = timers.length > 0 ? (
-    <div className="flex flex-col divide-y overflow-hidden rounded-xl border text-xs">
-      <div className="text-muted-foreground bg-muted/40 flex items-center justify-between px-2 py-1"><span>{DEMO ? "Sells set for later (keep this tab open)" : "Sells set for later (a server restart forgets them)"}</span><button type="button" className="hover:text-foreground underline-offset-4 hover:underline" onClick={() => void del("/api/trading/timers").then(loadTimers)}>clear finished</button></div>
-      {timers.map((t) => (
-        <div key={t.id} className="flex flex-wrap items-center gap-2 px-2 py-1">
-          <Pill tone={t.status === "done" ? "ok" : t.status === "error" ? "error" : t.status === "pending" ? "warn" : "muted"}>{t.status}</Pill>
-          <span>sell {t.percent}% from {t.publicKeys.length} wallet{t.publicKeys.length === 1 ? "" : "s"}</span>
-          {t.status === "pending" ? <Mono className="text-xs">in {countdown(t.dueAt - now)}</Mono> : null}
-          {t.error ? <span className="text-destructive">{t.error}</span> : null}
-          {t.result ? <span className="text-muted-foreground">{t.result.filter((r) => txOf(r)).length} sold · {t.result.filter((r) => r.error).length} failed{t.result.filter((r) => r.error).map((r) => ` · ${chain.short(r.publicKey)}: ${r.error}`).join("")}</span> : null}
-          {t.status === "pending" ? <Button size="xs" variant="ghost" className="ml-auto" onClick={() => void cancelTimer(t.id)} disabled={!!busy}>cancel</Button> : null}
-        </div>
-      ))}
-    </div>
-  ) : null
+  // every sell set for later, for the "Running on this coin" panel
+  const panelTimers = timers.map((t) => ({ id: t.id, wallets: t.publicKeys.length, percent: t.percent, dueAt: t.dueAt, status: t.status, error: t.error, summary: t.result ? `${t.result.filter((r) => txOf(r)).length} sold · ${t.result.filter((r) => r.error).length} failed` : undefined }))
   const holding = ordered.filter((w) => (row(w.publicKey)?.tokens ?? 0) > 0).length
 
   return (
@@ -678,6 +666,9 @@ export default function TradingPage() {
         </div>
       ) : null}
 
+      {/* under the chart: what the launch keeps doing on this coin and every sell set for later, one small chip each */}
+      {valid ? <AutomationsPanel query={q(coin)} now={now} timers={panelTimers} onCancelTimer={(id) => void cancelTimer(id)} onClearTimers={() => void del("/api/trading/timers").then(loadTimers)} demo={DEMO} /> : null}
+
       {valid && !phone ? (
         <div className="flex flex-col gap-3">
           {/* ── the terminal: the bulk rows and creator fees on top, then every wallet with its own buy and sell ── */}
@@ -701,7 +692,6 @@ export default function TradingPage() {
             </div>
             {walletRows}
           </div>
-          {timersBox}
         </div>
       ) : null}
 
@@ -727,7 +717,6 @@ export default function TradingPage() {
             {laterCell}
             {feesCell}
             {walletRows}
-            {timersBox ? <div className="p-2">{timersBox}</div> : null}
           </div>
         </BottomDock>
       ) : null}
@@ -736,7 +725,7 @@ export default function TradingPage() {
         {pnl && pnl.trades > 0 ? (
           <p className="text-sm">Result{pnl.tokensHeld > 0 ? " so far" : ""}: <b className={cn("font-mono tabular-nums", pnl.net > 0 ? "text-ok" : pnl.net < 0 ? "text-destructive" : "")}>{pnl.net > 0 ? "+" : ""}{pnl.net.toFixed(chain.decimals)} {chain.symbol}</b> <span className="text-muted-foreground text-xs">(every buy, sell and fee of your wallets)</span></p>
         ) : null}
-        {timersWaiting ? <p className="text-warn text-xs">{timersWaiting} timed sell{timersWaiting === 1 ? " is" : "s are"} still waiting under the wallets; cancel {timersWaiting === 1 ? "it" : "them"} there if the run is over.</p> : null}
+        {timersWaiting ? <p className="text-warn text-xs">{timersWaiting} timed sell{timersWaiting === 1 ? " is" : "s are"} still waiting (the Running bar under the chart); cancel {timersWaiting === 1 ? "it" : "them"} there if the run is over.</p> : null}
         <ol className="flex flex-col divide-y rounded-lg border text-xs">
           {closeSteps.map((c, i) => (
             <li key={c.key} className="flex items-center gap-2.5 px-2.5 py-2">

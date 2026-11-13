@@ -22,6 +22,8 @@ export const buy = (publicKey: string, token: string, eth: number, slippage?: nu
 export const sellAll = (publicKeys: string[], token: string, percent: number): Promise<SellAllResult> => core.sellAll(serverEnv(), publicKeys, token, percent)
 export const creatorOf = (token: string) => core.creatorOf(serverEnv(), token)
 export const creatorFees = (token: string) => core.creatorFees(serverEnv(), token)
+export const automations = (token: string) => core.automations(serverEnv(), token)
+export const controlAutomations = core.controlAutomations
 export const collectCreatorFees = (token: string) => core.collectCreatorFees(serverEnv(), token)
 export const tokenInfo = (token: string) => core.tokenInfo(serverEnv(), token)
 export const pnl = (token: string) => core.pnl(serverEnv(), token)

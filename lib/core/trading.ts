@@ -12,6 +12,7 @@ import type { Env } from "./launch"
 import { TOTAL_SUPPLY, claimTarget } from "./launch"
 import type { Expected, TokenInfo } from "../trenchy"
 import { same, type WalletInfo } from "./wallet-record"
+import { controlAutomation, viewAutomations, type Automation } from "../automations"
 
 export type Holding = WalletInfo & { eth: number; tokens: number; raw: string }
 
@@ -154,6 +155,14 @@ export async function collectCreatorFees(env: Env, token: string): Promise<{ cre
   const hash = claim || hashes[hashes.length - 1]
   return { creator, signature: hash, hash, hashes, confirmed: true }
 }
+
+// ── what the coin's launches keep running (lib/automations.ts) ───────────────
+
+/** Auto-sell, the volume maker, the later buyers, auto-claim of this coin's launches: where each stands (the Trading page's panel). */
+export const automations = (env: Env, token: string): Automation[] =>
+  viewAutomations(token, env.launches.list().filter((l) => same(l.token ?? "", token)).map((l) => ({ id: l.id, automations: l.automations })))
+/** Pause, resume or stop one of them. Null when nothing runs it any more (the page that launched was reloaded). */
+export const controlAutomations = (id: string, action: "pause" | "resume" | "stop"): Automation | null => controlAutomation(id, action)
 
 // ── live trades: wss://…/api/rh/data, subscribeTokenTrade per coin ──────────
 

@@ -311,7 +311,7 @@ export function prepareLaunch(env: Env, form: LaunchForm): LaunchRecord {
   const pad = padOf(form)
   if (pad.disabled) throw new Error(`${pad.name} cannot launch right now: ${pad.disabled}`)
   if (form.devBuySol > 0 && form.devBuySol < minBuyOf(form)) throw new Error(`The dev buy must be at least ${minBuyOf(form)} ${SYM} on ${pad.name} (or 0)`)
-  if (groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} bundle buyers; add the rest as later buyers`)
+  if (groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} first buyers; add the rest as later buyers`)
   env.wallets.assertBackedUp(dev.publicKey)
   const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
   const rec: LaunchRecord = { id, name: form.name, symbol: form.symbol, token: null, status: "running", createdAt: new Date().toISOString(), wallets: { dev: dev.publicKey, bundle: [], sniper: [], holder: [] }, hashes: { bundle: [], snipers: [], holders: [] }, pad: padOf(form).id, metadataUri: form.metadataUri || undefined }
@@ -346,7 +346,7 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     // the exempt list: bundle first (they buy in the launch window), then snipers, volume, later buyers
     const exempt = !exemptOf(form) ? [] : [...new Set([...rec.wallets.bundle, ...rec.wallets.sniper, ...volume, ...rec.wallets.holder].filter((pk) => !same(pk, rec.wallets.dev)))].slice(0, MAX_EXEMPT)
     saveLaunch(rec)
-    emit("wallets", `Creator ${rec.wallets.dev.slice(0, 10)}… · ${bundle.length} bundle · ${snipers.length} sniper · ${holders.length} later buyer${volume.length ? ` · ${volume.length} volume` : ""} wallet(s), all backed up${exemptOf(form) ? ` · ${exempt.length} on the snipe-tax exempt list` : ""}`)
+    emit("wallets", `Creator ${rec.wallets.dev.slice(0, 10)}… · ${bundle.length} first buyer · ${snipers.length} sniper · ${holders.length} later buyer${volume.length ? ` · ${volume.length} volume` : ""} wallet(s), all backed up${exemptOf(form) ? ` · ${exempt.length} on the snipe-tax exempt list` : ""}`)
 
     // 2. funding
     if (form.fundFirst) {
@@ -464,20 +464,20 @@ async function oneBuy(env: Env, token: string, w: WalletInfo, amount: number, sl
 async function bundleBuys(env: Env, token: string, wallets: Picked[], form: LaunchForm, emit: Emit, ours: Set<string>): Promise<string[]> {
   const lo = Math.max(0, form.bundleGap?.fromMs ?? 0), hi = Math.max(lo, form.bundleGap?.toMs ?? 0)
   if (hi === 0) {
-    emit("bundle", `${wallets.length} bundle buy(s) of ${amounts(wallets)}, all at once`)
-    const hs = await Promise.all(wallets.map((w) => oneBuy(env, token, w, w.amount, form.slippage, emit, "bundle")))
+    emit("buyers", `${wallets.length} first buy(s) of ${amounts(wallets)}, all at once, right after the create`)
+    const hs = await Promise.all(wallets.map((w) => oneBuy(env, token, w, w.amount, form.slippage, emit, "buyers")))
     return hs.filter((h): h is string => !!h)
   }
-  emit("bundle", `${wallets.length} bundle buy(s) of ${amounts(wallets)}, one by one ${lo}–${hi} ms apart`)
+  emit("buyers", `${wallets.length} first buy(s) of ${amounts(wallets)}, one by one ${lo}–${hi} ms apart`)
   const out: string[] = []
   const max = form.bundleMaxOutside ?? 0
   for (const [i, w] of wallets.entries()) {
     if (i > 0) await sleep(lo + Math.random() * (hi - lo))
     if (max > 0) {
       const net = await outsideNetIn(env, token, ours).catch(() => 0)
-      if (net > max) { emit("bundle", `Outside buyers already put in ${net.toFixed(4)} ${SYM} (limit ${max}): the ${wallets.length - i} bundle buy(s) still to come are skipped`); break }
+      if (net > max) { emit("buyers", `Outside buyers already put in ${net.toFixed(4)} ${SYM} (limit ${max}): the ${wallets.length - i} buy(s) still to come are skipped`); break }
     }
-    const h = await oneBuy(env, token, w, w.amount, form.slippage, emit, "bundle")
+    const h = await oneBuy(env, token, w, w.amount, form.slippage, emit, "buyers")
     if (h) out.push(h)
   }
   return out
@@ -737,7 +737,7 @@ export async function simulateLaunch(env: Env, form: LaunchForm): Promise<Simula
   checks.push({ name: "balance", ok: balance >= plan.total, detail: `main wallet holds ${balance.toFixed(5)} ${SYM}, the plan needs ${plan.total.toFixed(5)} ${SYM}` })
   if (plan.warnings.length) checks.push({ name: "plan", ok: plan.ok, detail: plan.warnings.join(" ") })
   checks.push({ name: "metadata", ok: !!form.image, detail: form.image ? `image ${form.image}` : "no image yet: pick one (the dry run used a placeholder)" })
-  if (groupSize(form.bundle) > MAX_BUNDLE_WALLETS) checks.push({ name: "bundle", ok: false, detail: `at most ${MAX_BUNDLE_WALLETS} bundle buyers` })
+  if (groupSize(form.bundle) > MAX_BUNDLE_WALLETS) checks.push({ name: "first buyers", ok: false, detail: `at most ${MAX_BUNDLE_WALLETS} first buyers` })
   const exempt = exemptOf(form) ? plan.rows.filter((r) => r.role !== "dev" && r.publicKey).map((r) => r.publicKey!).slice(0, MAX_EXEMPT) : []
   const built = await api.evm.tradeLocal({ wallet: creator.publicKey, action: "create", tokenMetadata: metadataOf({ ...form, name: form.name || "Simulation", symbol: form.symbol || "SIM" }, form.image || "https://trenchy.tools/og.png"), amount: form.devBuySol, ...(exempt.length ? { exemptWallets: exempt } : {}), slippage: form.slippage, ...(form.venueOptions ?? {}) })
   const simulation = await api.evm.simulate(built.transactions)

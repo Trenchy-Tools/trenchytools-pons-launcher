@@ -72,7 +72,7 @@ export type ChainConfig = {
   maxBundle: number
   /** the tip that carries a same-block bundle ("Jito tip"), or null when the chain has none */
   tipName: string | null
-  /** one line on how bundle buyers land, for the "?" of Bundle buyers (limits, lookup tables, …) */
+  /** one line on how the first buyers land, for the "?" of First buyers */
   bundleHelp: string
   /** a vanity address suffix the launchpad uses ("pump"), or null */
   vanitySuffix: string | null
@@ -168,7 +168,7 @@ export const chain: ChainConfig = {
   minGas: 0.0001,
   maxBundle: 16,
   tipName: null,
-  bundleHelp: "Robinhood Chain has a sequencer and no public mempool, so there is no Jito: the bundle buys all go out the moment the create confirms, usually landing in the next block. Every buyer goes on pons' exempt list (up to 31 wallets), so the launch-window snipe tax does not hit them.",
+  bundleHelp: "Robinhood Chain has a sequencer and no public mempool, so there is no Jito: the first buys all go out the moment the create confirms, usually landing in the next block. Every buyer goes on pons' exempt list (up to 31 wallets), so the launch-window snipe tax does not hit them.",
   vanitySuffix: null,
   evm: { api: "/api/rh", chainId: 4663, ws: true, exemptList: true, minBuy: 0.0001, totalSupply: 1_000_000_000, transferChain: "rh" },
   // creator fees: the pons escrow (70 % of the curve fee + snipe tax, plus the creator tax), claimed by the dev wallet

@@ -478,7 +478,7 @@ export default function LaunchPage() {
     const fresh = [...bundle, ...holders].filter((r) => !r.publicKey).length + (volOn ? vol.count : 0) + (devMode === "new" ? 1 : 0)
     if (fresh) out.push(`${fresh} new wallet${fresh === 1 ? " is" : "s are"} made and added to your Wallets list${DEMO ? " (their keys download as a file)" : ""}.`)
     if (fundFirst && (bundle.length || holders.length || volOn || devMode !== "main")) out.push(devMode !== "main" && !(bundle.length || holders.length || volOn) ? "Your main wallet sends the dev wallet what it needs." : "Your main wallet sends each of them what it needs.")
-    out.push(`${f.symbol || "Your coin"} is created on ${pad.name} and your ${devName} buys ${n(f.devBuySol)} ${sym}${bundle.length ? (useJito ? `; ${bundle.length} bundle wallet${bundle.length === 1 ? "" : "s"} buy in the same block` : `; then ${bundle.length} bundle wallet${bundle.length === 1 ? "" : "s"} buy right after, one by one`) : ""}.`)
+    out.push(`${f.symbol || "Your coin"} is created on ${pad.name} and your ${devName} buys ${n(f.devBuySol)} ${sym}${bundle.length ? (useJito ? `; ${bundle.length} bundle wallet${bundle.length === 1 ? "" : "s"} buy in the same block` : `; then ${bundle.length} first-buyer wallet${bundle.length === 1 ? "" : "s"} buy right after it, not in the same block`) : ""}.`)
     if (holders.length) out.push(`${holders.length} later buyer${holders.length === 1 ? "" : "s"} buy one by one over ${n(f.holderWindowS, 60)} s, starting ${n(f.holderDelayS, 10)} s after the launch.`)
     if (volOn) out.push(`The volume maker trades ${n(vol.budget)} ${chain.symbol} across ${vol.count} wallets for up to ${n(vol.minutes, 10)} min${vol.size === "wild" ? " in big runs of buys and sells" : vol.size === "calm" ? " in small trades" : ""}, and stops as soon as your ${devName} wallet has sold everything.`)
     if (autoOn) {
@@ -717,9 +717,9 @@ export default function LaunchPage() {
             {DEV_CHIPS.map((v) => <Chip key={v} active={f.devBuySol === v} onClick={() => setF((s) => ({ ...s, devBuySol: v }))}>{v}</Chip>)}
           </div>
 
-          {/* bundle buyers: off by default; on = new wallets that buy with the launch */}
+          {/* bundle buyers (same block: pump.fun) or first buyers (right after the create: everywhere else): off by default */}
           <div className={`flex flex-col gap-3 rounded-lg border p-3 ${bundle.length ? "" : "border-dashed"}`}>
-            <Toggle checked={bundle.length > 0} onChange={(on) => { setBundle(on ? resize([], 2, bundleEach) : []); if (!on) setPerWallet(false) }} label={<span><span className="font-medium">Bundle buyers</span> <Q k="bundle" className="mx-0.5" alert={bundle.length > 0} /> <span className="text-muted-foreground text-xs">· extra wallets that buy with the launch</span></span>} />
+            <Toggle checked={bundle.length > 0} onChange={(on) => { setBundle(on ? resize([], 2, bundleEach) : []); if (!on) setPerWallet(false) }} label={<span><span className="font-medium">{feat.sameBlock ? "Bundle buyers" : "First buyers"}</span> <Q k={feat.sameBlock ? "bundle" : "firstBuyers"} className="mx-0.5" alert={bundle.length > 0} /> <span className="text-muted-foreground text-xs">· {feat.sameBlock ? "extra wallets that buy with the launch" : "extra wallets that buy right after the coin is created"}</span></span>} />
             {bundle.length > 0 ? (
               <>
                 <Line label="How many">

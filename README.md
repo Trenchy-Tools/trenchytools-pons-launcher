@@ -19,7 +19,7 @@ A sibling of the pump.fun starter: same theme, same wallet folder, EVM instead o
   to ★** (each wallet sends its whole balance minus exactly the gas) **· Send ▾** (each wallet sends an amount, or
   everything, to one address: ★, another wallet, or any address you paste; direct, no exchange) **· Export keys ·
   Archive**. Results are toasts; API errors are shown verbatim.
-- **Launch**: name, symbol, image, socials, the dev wallet (★ unless changed), how many **bundle buyers** and **holder
+- **Launch**: name, symbol, image, socials, the dev wallet (★ unless changed), how many **first buyers** and **holder
   wallets** with an amount each (every row a new wallet unless you pick one). The Cost card, a dry run that lists every API
   call, then the launch with a live log of every hash and the Trading page opening on the coin.
 - **Trading**: every wallet in a row with **[amount] Buy** and **25 / 50 / 100 %** sell buttons that act at once; tick rows
@@ -39,8 +39,8 @@ a local, single-user tool.
 1. **Get a key** (one call, no account): `curl "https://api.trenchy.tools/api/create-api-key?label=me"` → paste the `apiKey` into `.env` as `TRENCHY_API_KEY`, then `npm install && npm run dev` and open http://localhost:3000.
 2. **Make a wallet.** Wallets → **+ New wallet**. The first one becomes ★ (the main wallet); its key is written to `./wallets` (inside the clone, git-ignored) before it shows up. Send it a little ETH on Robinhood Chain (copy the address from the row). 0.01 ETH is plenty for a first try.
 3. **Fill the coin in.** Launch → drop an image, type a name and a symbol. The image goes to IPFS by itself when you launch. There is no mint to pick: pons derives the address from the form, and the log shows it before anything is signed.
-4. **Pick the buys.** Dev buy (0.001–0.1 ETH chips), how many **Bundle buyers** (0–16) and **Holder wallets** (0–10), an amount each. Every row is a *new wallet* unless you pick an existing one; the **Cost** card on the right shows the shortfall ★ will send. Press **Dry run** to run the create on a copy of the chain and see every API call.
-5. **Launch.** The button says what is missing until it says `Launch (x ETH)`. New wallets are created, ★ tops every buyer up, the create goes out, and the moment it confirms every bundle wallet buys at once and the **Trading** page opens on the coin: the GMGN chart, every wallet with its tokens, **25 / 50 / 100 %** sell buttons and timed sells.
+4. **Pick the buys.** Dev buy (0.001–0.1 ETH chips), how many **First buyers** (0–16) and **Holder wallets** (0–10), an amount each. Every row is a *new wallet* unless you pick an existing one; the **Cost** card on the right shows the shortfall ★ will send. Press **Dry run** to run the create on a copy of the chain and see every API call.
+5. **Launch.** The button says what is missing until it says `Launch (x ETH)`. New wallets are created, ★ tops every buyer up, the create goes out, and the moment it confirms every first-buyer wallet buys at once (right after the create, not in the same block) and the **Trading** page opens on the coin: the GMGN chart, every wallet with its tokens, **25 / 50 / 100 %** sell buttons and timed sells.
 
 The dev wallet is a select in the Buys card (★ by default). Slippage and the funding switch are under **Advanced options**. **Auto-fill demo data** fills the whole form with the trenchy.tools coin and our logo.
 
@@ -90,12 +90,12 @@ pons is an EVM launchpad with a bonding curve that graduates to a Uniswap v4 poo
    transaction. Every API answer is an ordered list of `{ label, to, data, value, gas }`; each one is signed with
    `account.signTransaction`, sent with `POST /api/rh/send { transaction }` and confirmed with `GET /api/rh/tx/:hash`.
    An `approve` is confirmed before the transaction after it goes out.
-2. **No bundles, no Jito, no lookup tables.** The chain has a sequencer and no public mempool. "Bundle" here means: the
-   create goes out, and the moment `GET /api/rh/tx/:hash` says `success`, every bundle wallet's buy is sent at once,
+2. **No bundles, no Jito, no lookup tables.** The chain has a sequencer and no public mempool, so the app calls them
+   **first buyers**: the create goes out, and the moment `GET /api/rh/tx/:hash` says `success`, every first buyer's buy is sent at once,
    each with its own nonce. Holders are spread over `holderWindowS` (snipers, staggered by `sniperGapMs`, exist in the API form only) with
    jitter after `holderDelayS` (Settings).
 3. **Snipe tax.** pons taxes buys in the launch window unless the wallet is on the creator's exempt list. The create
-   call carries `tokenMetadata` and `exemptWallets` (up to 31); the app puts every bundle, sniper and holder wallet on
+   call carries `tokenMetadata` and `exemptWallets` (up to 31); the app puts every first-buyer, sniper and holder wallet on
    that list and warns when there are more than 31.
 
 The launch itself: image → `POST /api/ipfs` → `metadata.image`; `POST /api/rh/trade-local { wallet: dev, action:
@@ -104,7 +104,7 @@ sign and send in order; wait for `success`; then the buys (`POST /api/rh/trade-l
 predicted.token, amount }` per wallet). The log shows every hash with its Blockscout link and the coin's pons page; the
 record lands in `_app/pons-starter/launches.json`.
 
-**The Launch page** is two things: the coin (image, name, symbol) and the buys (dev buy; how many **bundle buyers** and
+**The Launch page** is two things: the coin (image, name, symbol) and the buys (dev buy; how many **first buyers** and
 **holder wallets**, an amount each, every row a *new wallet* unless you pick an existing one). Press **Launch**: the image
 goes to IPFS by itself (`POST /api/launch/image` → `POST /api/ipfs`), the new wallets are created (keys saved first), the
 ★ wallet tops every short buyer up, the create goes out, and the moment it confirms the **Trading** page opens on the coin

@@ -58,5 +58,5 @@ export function parseCsvLine(line: string): string[] {
   return cells
 }
 
-/** The name of a wallet made for a launch: the coin and the job ("LASER bundle", numbered when several: "LASER bundle 2"). */
-export const launchWalletLabel = (symbol: string | undefined, role: string) => `${(symbol ?? "").trim().slice(0, 12)} ${role === "holder" ? "later buyer" : role}`.trim()
+/** The name of a wallet made for a launch: the coin and the job ("LASER buyer", numbered when several: "LASER buyer 2"). */
+export const launchWalletLabel = (symbol: string | undefined, role: string) => `${(symbol ?? "").trim().slice(0, 12)} ${role === "holder" ? "later buyer" : role === "bundle" ? "buyer" : role}`.trim()
